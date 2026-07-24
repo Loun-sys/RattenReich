@@ -22,15 +22,20 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Prepare static site
-        run: |
-          mkdir site
-          unzip -q rattenreich-pages.zip -d site
-          grep -rl '/Ratten-Reich' site | xargs -r sed -i 's#/Ratten-Reich#/RattenReich#g'
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - name: Install dependencies
+        run: npm ci
+      - name: Build static site
+        run: npm run build:pages
+        env:
+          NEXT_PUBLIC_BASE_PATH: /RattenReich
       - uses: actions/configure-pages@v5
       - uses: actions/upload-pages-artifact@v3
         with:
-          path: site
+          path: out
       - name: Deploy to GitHub Pages
         id: deployment
         uses: actions/deploy-pages@v4
