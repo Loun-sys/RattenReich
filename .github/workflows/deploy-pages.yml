@@ -50,6 +50,8 @@ jobs:
               fixed = text
               for old, new in replacements:
                   fixed = fixed.replace(old, new)
+              if path.suffix.lower() == '.html':
+                  fixed = fixed.replace('.js\"', '.js?v=18\"').replace('.css\"', '.css?v=18\"')
               if fixed != text:
                   path.write_text(fixed, encoding='utf-8')
           PY
