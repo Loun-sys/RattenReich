@@ -51,8 +51,8 @@ jobs:
               for old, new in replacements:
                   fixed = fixed.replace(old, new)
               if path.suffix.lower() == '.html':
-                  fixed = fixed.replace('.js\"', '.js?v=19\"').replace('.css\"', '.css?v=19\"')
-                  guard = """<script id="rr-skill-min-guard">(()=>{const sync=()=>document.querySelectorAll('.rows.skills .stat-row').forEach(r=>{const s=r.querySelector('[role="status"]'),b=r.querySelector('button[aria-label="Уменьшить"]');if(s&&b)b.disabled=Number(s.textContent)<=-3});document.addEventListener('click',e=>{const b=e.target.closest?.('button[aria-label="Уменьшить"]');if(b&&b.closest('.rows.skills')&&Number(b.closest('.stat-row')?.querySelector('[role="status"]')?.textContent)<=-3){e.preventDefault();e.stopImmediatePropagation()}},true);new MutationObserver(sync).observe(document.body,{subtree:true,childList:true,characterData:true});sync()})();</script>"""
+                  fixed = fixed.replace('.js\"', '.js?v=20\"').replace('.css\"', '.css?v=20\"')
+                  guard = """<script id="rr-skill-min-guard">(()=>{const sync=()=>document.querySelectorAll('.rows.skills .stat-row').forEach(r=>{const s=r.querySelector('output'),b=r.querySelector('button[aria-label="Уменьшить"]');if(s&&b)b.disabled=Number(s.textContent)<=-3});document.addEventListener('click',e=>{const b=e.target.closest?.('button[aria-label="Уменьшить"]');if(b&&b.closest('.rows.skills')&&Number(b.closest('.stat-row')?.querySelector('output')?.textContent)<=-3){e.preventDefault();e.stopImmediatePropagation()}},true);new MutationObserver(sync).observe(document.body,{subtree:true,childList:true,characterData:true});sync()})();</script>"""
                   if 'rr-skill-min-guard' not in fixed:
                       fixed = fixed.replace('</body>', guard + '</body>')
               if fixed != text:
