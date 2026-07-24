@@ -1,0 +1,12 @@
+.env
+.venv
+__pycache__
+*.py[cod]
+*.log
+data
+.git
+.gitignore
+README.md
+test_smoke.py
+preview_card.py
+card-preview.png
