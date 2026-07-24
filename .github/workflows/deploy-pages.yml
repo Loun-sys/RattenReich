@@ -22,20 +22,39 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
-        with:
-          node-version: 22
-          cache: npm
-      - name: Install dependencies
-        run: npm ci
-      - name: Build static site
-        run: npm run build:pages
-        env:
-          NEXT_PUBLIC_BASE_PATH: /RattenReich
+      - name: Prepare static site
+        run: |
+          mkdir site
+          unzip -q rattenreich-pages.zip -d site
+          python - <<'PY'
+          from pathlib import Path
+
+          replacements = (
+              ('/Ratten-Reich', '/RattenReich'),
+              ('/RattenReich/_next', '__RR_NEXT__'),
+              ('/RattenReich/images/', '__RR_IMAGES__'),
+              ('/RattenReich/favicon.svg', '__RR_FAVICON__'),
+              ('/_next', '/RattenReich/_next'),
+              ('/images/', '/RattenReich/images/'),
+              ('/favicon.svg', '/RattenReich/favicon.svg'),
+              ('__RR_NEXT__', '/RattenReich/_next'),
+              ('__RR_IMAGES__', '/RattenReich/images/'),
+              ('__RR_FAVICON__', '/RattenReich/favicon.svg'),
+          )
+          for path in Path('site').rglob('*'):
+              if not path.is_file() or path.suffix.lower() not in {'.html', '.js', '.css', '.json', '.txt', '.svg'}:
+                  continue
+              text = path.read_text(encoding='utf-8')
+              fixed = text
+              for old, new in replacements:
+                  fixed = fixed.replace(old, new)
+              if fixed != text:
+                  path.write_text(fixed, encoding='utf-8')
+          PY
       - uses: actions/configure-pages@v5
       - uses: actions/upload-pages-artifact@v3
         with:
-          path: out
+          path: site
       - name: Deploy to GitHub Pages
         id: deployment
         uses: actions/deploy-pages@v4
