@@ -59,8 +59,24 @@ def _wrapped_lines(draw: ImageDraw.ImageDraw, text: str, font, width: int) -> li
         if not words:
             lines.append("")
             continue
-        current = words[0]
-        for word in words[1:]:
+        wrapped_words: list[str] = []
+        for word in words:
+            if draw.textbbox((0, 0), word, font=font)[2] <= width:
+                wrapped_words.append(word)
+                continue
+            fragment = ""
+            for character in word:
+                candidate = fragment + character
+                if fragment and draw.textbbox((0, 0), candidate, font=font)[2] > width:
+                    wrapped_words.append(fragment)
+                    fragment = character
+                else:
+                    fragment = candidate
+            if fragment:
+                wrapped_words.append(fragment)
+
+        current = wrapped_words[0]
+        for word in wrapped_words[1:]:
             candidate = f"{current} {word}"
             if draw.textbbox((0, 0), candidate, font=font)[2] <= width:
                 current = candidate
