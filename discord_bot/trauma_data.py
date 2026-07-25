@@ -56,8 +56,13 @@ PHYSICAL_TRAUMAS = {
 }
 
 def _load_psychological_traumas() -> dict[int, Trauma]:
-    source = Path(__file__).resolve().parent.parent / "Психологические травмы.txt"
-    if not source.exists():
+    module_dir = Path(__file__).resolve().parent
+    candidates = (
+        module_dir.parent / "Психологические травмы.txt",
+        module_dir / "PSYCHOLOGICAL_TRAUMAS_SOURCE.txt",
+    )
+    source = next((candidate for candidate in candidates if candidate.is_file()), None)
+    if source is None:
         return {}
     text = source.read_text(encoding="utf-8")
     pattern = re.compile(

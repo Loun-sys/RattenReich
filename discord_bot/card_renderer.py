@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import os
+from functools import lru_cache
 from io import BytesIO
 from pathlib import Path
 
@@ -8,15 +10,25 @@ from PIL import Image, ImageDraw, ImageFilter, ImageFont, ImageOps
 from constants import ATTRIBUTES, RANK_FILES, RANKS
 
 
+@lru_cache(maxsize=64)
 def _font(size: int, bold: bool = False) -> ImageFont.FreeTypeFont | ImageFont.ImageFont:
+    configured = os.getenv("RATTEN_FONT_BOLD" if bold else "RATTEN_FONT_REGULAR", "").strip()
+    filename = "DejaVuSans-Bold.ttf" if bold else "DejaVuSans.ttf"
     candidates = [
+        Path(configured) if configured else None,
+        Path(__file__).resolve().parent / "assets" / "fonts" / filename,
         Path("C:/Windows/Fonts/arialbd.ttf" if bold else "C:/Windows/Fonts/arial.ttf"),
         Path("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf" if bold else "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"),
+        Path("/usr/share/fonts/dejavu/DejaVuSans-Bold.ttf" if bold else "/usr/share/fonts/dejavu/DejaVuSans.ttf"),
+        Path("/usr/share/fonts/truetype/liberation2/LiberationSans-Bold.ttf" if bold else "/usr/share/fonts/truetype/liberation2/LiberationSans-Regular.ttf"),
     ]
     for candidate in candidates:
-        if candidate.exists():
+        if candidate and candidate.is_file():
             return ImageFont.truetype(str(candidate), size=size)
-    return ImageFont.load_default()
+    raise RuntimeError(
+        "Не найден шрифт с поддержкой кириллицы. "
+        "Установите fonts-dejavu-core или задайте RATTEN_FONT_REGULAR и RATTEN_FONT_BOLD."
+    )
 
 
 def _fit_text(draw: ImageDraw.ImageDraw, text: str, box_width: int, start_size: int, bold: bool = False):
