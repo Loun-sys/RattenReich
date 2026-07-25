@@ -347,7 +347,7 @@ class Database:
                         item["armor_slot"],
                     ),
                 )
-                if item["category"] == "Броня" and previous_id is not None and previous_max != item["max_durability"]:
+                if item["category"] in {"Броня", "Щит"} and previous_id is not None and previous_max != item["max_durability"]:
                     issued_rows = await db.execute_fetchall(
                         "SELECT id,durability FROM inventory WHERE item_id=?",
                         (previous_id,),

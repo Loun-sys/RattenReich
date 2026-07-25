@@ -973,13 +973,13 @@ async def build_inventory_embed(
     lines = []
     for item in visible_items:
         details = []
-        if item["category"] == "Броня":
+        if item["category"] in {"Броня", "Щит"}:
             details.append(f'защита {item["durability"]}/{item["max_durability"]}')
         else:
             details.append(f'{item["durability"]} качества')
         if item["damage"]:
             details.append(f'{item["damage"]} урона')
-        if item["defense"] and item["category"] != "Броня":
+        if item["defense"] and item["category"] not in {"Броня", "Щит"}:
             details.append(f'{item["defense"]} куб. защиты')
         hand_label = {1: "одноручное", 2: "двуручное"}.get(int(item["hands"] or 0))
         if hand_label:
@@ -2026,11 +2026,7 @@ class AttackView(discord.ui.View):
         for item_id, values in armor_rolls.items():
             item = target_items.get(item_id)
             if item:
-                state = (
-                    f'защита {item["durability"]}/{item["max_durability"]}'
-                    if item["category"] == "Броня"
-                    else f'защита {item["defense"]} · качество {item["durability"]}/{item["max_durability"]}'
-                )
+                state = f'защита {item["durability"]}/{item["max_durability"]}'
                 lines.append(f'{item["name"]} · {state}: {colored_dice(values, "gear")}')
         for source, values in (indestructible_rolls or {}).items():
             lines.append(f'{source} · неразрушаемые: {colored_dice(values, "gear")}')
@@ -2059,7 +2055,8 @@ class AttackView(discord.ui.View):
                 if ones:
                     durability = await bot.db.adjust_inventory_durability(item_id, target["id"], -ones)
                     slot = item["size"] if item else "неизвестная"
-                    lines.append(f'{slot} броня «{item["name"] if item else "неизвестная"}» повреждена на {ones} → **{durability}**.')
+                    kind = "броня" if item and item["category"] == "Броня" else "щит"
+                    lines.append(f'{slot} {kind} «{item["name"] if item else "неизвестный"}» повреждён на {ones} → **{durability}**.')
             lines.append(await apply_damage(target, self.target_attribute, damage))
         embed = discord.Embed(
             title=f'Итог защиты · {target["surname"]} {target["name"]}',
@@ -2133,7 +2130,7 @@ class AttackView(discord.ui.View):
             if item["category"] == "Броня" and not ignores_armor
         }
         armor_rolls.update({
-            item["id"]: d6(int(item["defense"] or item["durability"]))
+            item["id"]: d6(int(item["durability"]))
             for item in equipped
             if item["category"] == "Щит"
         })

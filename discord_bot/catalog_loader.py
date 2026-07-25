@@ -65,6 +65,10 @@ def _apply_summary_overrides(items: list[dict[str, Any]], source_path: Path) -> 
             if item["category"] == "Броня":
                 item["max_durability"] = max(1, int(item.get("defense") or 0))
                 item["gear"] = int(item.get("defense") or 0)
+            elif item["category"] == "Щит":
+                item["gear"] = max(1, int(item.get("gear") or 1))
+                item["defense"] = item["gear"]
+                item["max_durability"] = item["gear"]
             elif "gear" in override:
                 item["max_durability"] = max(1, int(item["gear"]))
         item["properties"] = re.sub(
@@ -138,9 +142,8 @@ def load_catalog(path: Path) -> list[dict[str, Any]]:
             effect = row.get("Игровой эффект") or row.get("Эффект") or ""
             expanded_effect = glossary.get(effect.rstrip("."), effect)
             defense = _integer(row.get("Защита", ""), 0)
-            if category == "Щит" and not defense:
-                match = re.search(r"\+(\d+)\s+(?:неразрушаем\w+\s+куб\w+\s+)?(?:к\s+)?[Зз]ащит", effect)
-                defense = int(match.group(1)) if match else 0
+            if category == "Щит":
+                defense = gear
             compatibility = row.get("Совместимое оружие") or ""
             ammo_type = row.get("Боеприпас") or ""
             access = row.get("Допуск") or "Общедоступное"
