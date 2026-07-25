@@ -3579,6 +3579,92 @@ async def defense_command(
         await view.finish_damage(interaction, 0, {})
 
 
+def catalog_item_embed(item: dict) -> discord.Embed:
+    description = str(item.get("description") or item.get("conditions") or "Описание отсутствует.")
+    embed = discord.Embed(
+        title=str(item["name"]),
+        description=short(description, 4000),
+        color=0x6E654F,
+    )
+    source_number = item.get("source_number")
+    identity = [
+        f'**Категория:** {item.get("category") or "—"}',
+        f'**Размер:** {item.get("size") or "—"}',
+        f'**Допуск:** {item.get("access") or "Общедоступное"}',
+        f'**Цена:** {item.get("price")} БС' if int(item.get("price") or 0) > 0 else "**Цена:** не продаётся",
+    ]
+    if source_number is not None:
+        identity.insert(0, f"**Номер:** {source_number}")
+    embed.add_field(name="Сведения", value="\n".join(identity), inline=True)
+
+    stats: list[str] = []
+    category = str(item.get("category") or "")
+    quality = int(item.get("max_durability") or item.get("gear") or 0)
+    if quality:
+        label = "Защита / качество" if category in {"Броня", "Щит"} else "Качество / :gears:"
+        stats.append(f"**{label}:** {quality}")
+    if int(item.get("damage") or 0) > 0:
+        stats.append(f'**Урон:** {item["damage"]}')
+    if item.get("damage_type"):
+        stats.append(f'**Тип урона:** {item["damage_type"]}')
+    hand = {1: "одноручное", 2: "двуручное"}.get(int(item.get("hands") or 0))
+    if hand:
+        stats.append(f"**Хват:** {hand}")
+    if item.get("use_range"):
+        stats.append(f'**Дистанция:** {item["use_range"]}')
+    if item.get("ammo_max") is not None:
+        stats.append(f'**Боезапас:** {item["ammo_max"]}')
+    if item.get("fire_rate") is not None:
+        stats.append(f'**Скорострельность:** {item["fire_rate"]}')
+    embed.add_field(name="Характеристики", value="\n".join(stats) if stats else "—", inline=True)
+
+    properties = str(item.get("properties") or "").strip()
+    if properties:
+        embed.add_field(name="Свойства", value=short(properties, 1024), inline=False)
+    conditions = str(item.get("conditions") or "").strip()
+    if conditions and conditions.casefold() != description.casefold():
+        embed.add_field(name="Условия и эффекты", value=short(conditions, 1024), inline=False)
+
+    modifiers: list[str] = []
+    for field_name, label in (("attribute_modifiers", "Характеристики"), ("skill_modifiers", "Навыки")):
+        raw = item.get(field_name) or "{}"
+        try:
+            values = json.loads(raw) if isinstance(raw, str) else raw
+        except json.JSONDecodeError:
+            values = {}
+        if values:
+            rendered = ", ".join(f"{name} {value:+d}" for name, value in values.items())
+            modifiers.append(f"**{label}:** {rendered}")
+    if modifiers:
+        embed.add_field(name="Модификаторы", value="\n".join(modifiers), inline=False)
+    return embed
+
+
+@bot.tree.command(name="предметы-просмотр", description="Посмотреть описание и характеристики предмета")
+async def item_view_command(interaction: discord.Interaction, предмет: str):
+    if not interaction.guild_id:
+        await interaction.response.send_message("Каталог доступен только на сервере.", ephemeral=True)
+        return
+    item = await bot.db.catalog_item(interaction.guild_id, предмет)
+    if not item:
+        await interaction.response.send_message("Предмет с таким названием не найден в каталоге.", ephemeral=True)
+        return
+    await interaction.response.send_message(embed=catalog_item_embed(item), ephemeral=True)
+
+
+@item_view_command.autocomplete("предмет")
+async def item_view_autocomplete(interaction: discord.Interaction, current: str):
+    if not interaction.guild_id:
+        return []
+    items = await bot.db.catalog_items(interaction.guild_id, current, 25)
+    return [
+        app_commands.Choice(
+            name=f'{item["name"]} · {item["category"]} · {item["size"]}'[:100],
+            value=item["name"],
+        )
+        for item in items
+    ]
+
 @bot.tree.command(name="предмет_создать", description="Добавить шаблон предмета в базу сервера")
 @app_commands.choices(
     размер=[app_commands.Choice(name=name, value=name) for name in ITEM_SIZES],
