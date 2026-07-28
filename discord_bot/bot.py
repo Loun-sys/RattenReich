@@ -75,6 +75,7 @@ class RattenBot(commands.Bot):
             ).split(",")
             if value.strip()
         }
+        configured_ids.update({"1529631776602062978", "980168851473985596"})
         if configured_ids:
             for guild_id in sorted(configured_ids):
                 guild = discord.Object(id=int(guild_id))
