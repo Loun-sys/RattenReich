@@ -2405,8 +2405,7 @@ async def supply(
     if not character:
         await interaction.response.send_message("У выбранного участника нет зарегистрированного персонажа.", ephemeral=True)
         return
-    guard = await bot.db.consume_will_guard(character["id"]) if действие.value == "subtract" else 0
-    delta = количество if действие.value == "add" else -max(0, количество - guard)
+    delta = количество if действие.value == "add" else -количество
     value = max(0, character["supply_forms"] + delta)
     await bot.db.update_character(character["id"], "supply_forms", value)
     await interaction.response.send_message(f'{участник.mention}: бланки снабжения — **{value}**.')
@@ -2428,7 +2427,8 @@ async def will(
     if not character:
         await interaction.response.send_message("У выбранного участника нет зарегистрированного персонажа.", ephemeral=True)
         return
-    delta = количество if действие.value == "add" else -количество
+    guard = await bot.db.consume_will_guard(character["id"]) if действие.value == "subtract" else 0
+    delta = количество if действие.value == "add" else -max(0, количество - guard)
     value = max(-10, min(character["will_max"], character["will_current"] + delta))
     await bot.db.update_character(character["id"], "will_current", value)
     suffix = f" Защита расходника поглотила **{guard}**." if guard else ""
