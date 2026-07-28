@@ -459,12 +459,21 @@ class Database:
     async def purchase_skill(self, character_id: int, name: str, cap: int, price: int = 8) -> tuple[bool, str, int | None]:
         async with self.connect() as db:
             await db.execute("BEGIN IMMEDIATE")
-            chars = await db.execute_fetchall("SELECT supply_forms,skills_initialized FROM characters WHERE id=?", (character_id,))
+            chars = await db.execute_fetchall("SELECT supply_forms,skills_initialized,race FROM characters WHERE id=?", (character_id,))
             rows = await db.execute_fetchall("SELECT value FROM skills WHERE character_id=? AND name=?", (character_id, name))
             if not chars or not rows:
                 await db.rollback(); return False, "Персонаж или навык не найден.", None
             if not int(chars[0]["skills_initialized"]):
-                await db.rollback(); return False, "Сначала завершите стартовое распределение навыков.", None
+                all_skills = await db.execute_fetchall(
+                    "SELECT value FROM skills WHERE character_id=?", (character_id,)
+                )
+                values = [int(row["value"]) for row in all_skills]
+                budget = 12 if chars[0]["race"] == "Мыши" else 8 if chars[0]["race"] == "Тараканы" else 10
+                used = sum(value + 3 for value in values)
+                if any(value < -5 or value > 5 for value in values) or used != budget:
+                    await db.rollback()
+                    return False, f"Сначала завершите стартовое распределение: нужно {budget} очков, распределено {used}.", None
+                await db.execute("UPDATE characters SET skills_initialized=1 WHERE id=?", (character_id,))
             value = int(rows[0]["value"])
             if value >= cap:
                 await db.rollback(); return False, f"Предел навыка — {cap}.", int(chars[0]["supply_forms"])

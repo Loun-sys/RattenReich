@@ -231,6 +231,21 @@ def starting_skill_budget(race: str) -> int:
     return 12 if race == "\u041c\u044b\u0448\u0438" else 8 if race == "\u0422\u0430\u0440\u0430\u043a\u0430\u043d\u044b" else 10
 
 
+
+def starting_skills_ready(character: dict) -> bool:
+    return bool(int(character.get("skills_initialized", 1)))
+
+
+async def reject_unfinished_skills(interaction: discord.Interaction, character: dict) -> bool:
+    if starting_skills_ready(character):
+        return False
+    await interaction.response.send_message(
+        "Сначала распределите стартовые очки навыков и зафиксируйте их командой `/навыки-завершить`.",
+        ephemeral=True,
+    )
+    return True
+
+
 def talent_effect(character: dict, key: str, default=None):
     values = []
     for name in character.get("talents", {}):
@@ -2808,6 +2823,8 @@ async def skill_roll_command(
     character = await get_character(interaction)
     if not character:
         return
+    if await reject_unfinished_skills(interaction, character):
+        return
     skill = normalize(навык, tuple(character["skills"]))
     if not skill or skill not in SKILL_ATTRIBUTES:
         await interaction.response.send_message("Выберите навык персонажа из списка.", ephemeral=True)
@@ -2939,6 +2956,8 @@ async def send_attack(
     target_character = await bot.db.character(interaction.guild_id, target.id) if target else None
     if not attacker or (target and not target_character):
         await interaction.response.send_message("У атакующего или выбранной цели нет зарегистрированного персонажа.", ephemeral=True)
+        return
+    if await reject_unfinished_skills(interaction, attacker):
         return
     skill = "Стрельба" if ranged else "Драка"
     if ranged:
