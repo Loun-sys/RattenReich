@@ -2727,6 +2727,57 @@ async def skill_roll_item_autocomplete(interaction: discord.Interaction, current
     ][:25]
 
 
+class NPCTargetAttackView(AttackView):
+    def __init__(self, *args, target_npc: dict, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.target_npc = target_npc
+
+    @discord.ui.button(label="Завершить атаку", style=discord.ButtonStyle.success)
+    async def finish_npc_button(self, interaction: discord.Interaction, _: discord.ui.Button):
+        if self.resolved or interaction.user.id != self.attacker_id:
+            await interaction.response.send_message("Завершить атаку может только атакующий.", ephemeral=True)
+            return
+        self.resolved = True
+        npc = await bot.db.npc(interaction.guild_id, self.target_npc["name"])
+        if not npc:
+            await interaction.response.send_message("Выбранный НПС больше не существует.", ephemeral=True)
+            return
+        current = int(npc["physique"] if self.target_attribute == "Телосложение" else npc["agility"])
+        maximum = int(npc["physique_max"] if self.target_attribute == "Телосложение" else npc["agility_max"])
+        if current <= 0:
+            await interaction.response.send_message("Этот НПС уже выведен из строя.", ephemeral=True)
+            return
+        defense_dice = d6(int(npc["defense"]))
+        defense_successes = sum(value == 6 for value in defense_dice)
+        net = max(0, self.attack_successes - defense_successes)
+        damage_factor = max(1, int(self.weapon["damage"])) if self.weapon else 1
+        damage = max(0, net * damage_factor + self.damage_modifier)
+        before, after = await bot.db.damage_npc_attribute(
+            npc["id"], self.target_attribute, damage
+        )
+        defense_change = None
+        if damage > 0:
+            defense_change = await bot.db.adjust_npc_defense(npc["id"], -1)
+        embed = self.attack_embed()
+        embed.add_field(
+            name=f'Автоматическая защита · {npc["name"]}',
+            value=(
+                f'Кубы: {colored_dice(defense_dice, "gear")}\n'
+                f'Успехов защиты: **{defense_successes}**\n'
+                f'Незаблокированных успехов: **{net}**\n'
+                + (f'Модификатор урона: **{self.damage_modifier:+d}**\n' if self.damage_modifier else "")
+                + f'Урон: **{damage}**\n'
+                f'{self.target_attribute}: **{before}/{maximum} → {after}/{maximum}**'
+                + (
+                    f'\nЗащита пробита: **{defense_change[0]} → {defense_change[1]}**'
+                    if defense_change else ""
+                )
+            ),
+            inline=False,
+        )
+        await interaction.response.edit_message(embed=embed, view=None)
+
+
 async def send_attack(
     interaction: discord.Interaction,
     target: discord.Member | None,
@@ -2808,46 +2859,17 @@ async def send_attack(
     ]
     if npc:
         npc_current = int(npc["physique"] if target_attribute == "Телосложение" else npc["agility"])
-        npc_maximum = int(npc["physique_max"] if target_attribute == "Телосложение" else npc["agility_max"])
         if npc_current <= 0:
             await interaction.response.send_message("Этот НПС уже выведен из строя.", ephemeral=True)
             return
-        defense_dice = d6(int(npc["defense"]))
-        defense_successes = sum(value == 6 for value in defense_dice)
-        attack_successes = sum(pool.successes for pool in pools)
-        net = max(0, attack_successes - defense_successes)
-        damage_factor = max(1, int(weapon["damage"])) if weapon else 1
-        damage_modifier = damage_bonus - damage_penalty + automatic_damage_bonus
-        raw_damage = max(0, net * damage_factor + damage_modifier)
-        reduction = 0
-        damage = max(0, raw_damage - reduction)
-        before, after = await bot.db.damage_npc_attribute(npc["id"], target_attribute, damage)
-        defense_change = None
-        if damage > 0:
-            defense_change = await bot.db.adjust_npc_defense(npc["id"], -1)
-        preview = AttackView(
+        view = NPCTargetAttackView(
             interaction.user.id, None, attacker, pools, weapon, ranged,
             distance, distance_modifier, target_attribute,
-            damage_modifier=damage_modifier,
-        ).attack_embed()
-        preview.add_field(
-            name=f'Автоматическая защита · {npc["name"]}',
-            value=(
-                f'Кубы: {colored_dice(defense_dice, "gear")}\n'
-                f'Успехов защиты: **{defense_successes}**\n'
-                f'Незаблокированных успехов: **{net}**\n'
-                + (f'Модификатор урона: **{damage_modifier:+d}**\n' if damage_modifier else "")
-                + (f'Снижение бронёй: **−{reduction} урона**\n' if reduction else "")
-                + f'Урон: **{damage}**\n'
-                f'{target_attribute}: **{before}/{npc_maximum} → {after}/{npc_maximum}**'
-                + (
-                    f'\nЗащита пробита: **{defense_change[0]} → {defense_change[1]}**'
-                    if defense_change else ""
-                )
-            ),
-            inline=False,
+            damage_modifier=damage_bonus - damage_penalty + automatic_damage_bonus,
+            target_npc=npc,
         )
-        await interaction.response.send_message(embed=preview)
+        await interaction.response.send_message(embed=view.attack_embed(), view=view)
+        view.message = await interaction.original_response()
         return
     view = AttackView(
         interaction.user.id,
