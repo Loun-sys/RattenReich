@@ -211,6 +211,25 @@ def has_talent(character: dict, name: str) -> bool:
     return name in character.get("talents", {})
 
 
+def talent_skill_bonus_details(character: dict, skill: str) -> list[tuple[str, int]]:
+    details = []
+    for name in character.get("talents", {}):
+        talent = TALENT_BY_NAME.get(name.casefold())
+        value = (talent or {}).get("effects", {}).get("skill_bonus", {}).get(skill, 0)
+        if value:
+            details.append((f'\u0422\u0430\u043b\u0430\u043d\u0442 \u00ab{name}\u00bb', int(value)))
+    return details
+
+
+def character_skill_cap(character: dict, skill: str) -> int:
+    caps = talent_effect(character, "skill_cap", {}) or {}
+    return max(5, int(caps.get(skill, 5)))
+
+
+def starting_skill_budget(race: str) -> int:
+    return 12 if race == "\u041c\u044b\u0448\u0438" else 8 if race == "\u0422\u0430\u0440\u0430\u043a\u0430\u043d\u044b" else 10
+
+
 def talent_effect(character: dict, key: str, default=None):
     values = []
     for name in character.get("talents", {}):
@@ -368,6 +387,8 @@ class RollPool:
     charged_gear_ones: dict[int, int] = field(default_factory=dict)
     flat_success_modifier: int = 0
     minimum_successes: int = 0
+    skill_modifier_details: list[tuple[str, int]] = field(default_factory=list)
+    success_modifier_details: list[tuple[str, int]] = field(default_factory=list)
 
     @property
     def successes(self) -> int:
@@ -396,7 +417,18 @@ def make_pool(
 ) -> RollPool:
     attribute_map = talent_effect(character, "skill_attribute", {}) or {}
     attribute = attribute_override or attribute_map.get(skill) or SKILL_ATTRIBUTES[skill]
-    skill_total = int(character["skills"].get(skill, -3)) + racial_skill_bonus(character, skill) + custom_modifier
+    permanent_skill = int(character["skills"].get(skill, -3))
+    race_bonus = racial_skill_bonus(character, skill)
+    talent_details = talent_skill_bonus_details(character, skill)
+    talent_bonus = sum(value for _, value in talent_details)
+    skill_total = permanent_skill + race_bonus + talent_bonus + custom_modifier
+    guaranteed = max(0, permanent_skill - 5) if skill in {"\u041b\u0435\u0447\u0435\u043d\u0438\u0435", "\u041e\u0431\u0440\u0430\u0449\u0435\u043d\u0438\u0435", "\u0417\u0430\u0449\u0438\u0442\u0430"} else 0
+    modifier_details = []
+    if race_bonus:
+        modifier_details.append((f'\u0420\u0430\u0441\u0430 \u00ab{character["race"]}\u00bb', race_bonus))
+    modifier_details.extend(talent_details)
+    if custom_modifier:
+        modifier_details.append(("\u041f\u0440\u043e\u0447\u0438\u0435 \u043c\u043e\u0434\u0438\u0444\u0438\u043a\u0430\u0442\u043e\u0440\u044b", custom_modifier))
     maximum_rules = talent_effect(character, "max_attribute_for", {}) or {}
     attribute_value = character["attributes"][attribute]["max" if use_max_attribute or maximum_rules.get(skill) == attribute else "current"]
     minimum_rules = talent_effect(character, "minimum_success", {}) or {}
@@ -407,8 +439,10 @@ def make_pool(
         skill_dice=d6(max(0, skill_total)),
         negative_dice=d6(max(0, -skill_total)),
         gear_dice={item_id: d6(count) for item_id, count in (gear or {}).items()},
-        flat_success_modifier=success_modifier,
+        flat_success_modifier=success_modifier + guaranteed,
         minimum_successes=int(minimum_rules.get(skill, 0)),
+        skill_modifier_details=modifier_details,
+        success_modifier_details=([("\u041f\u043e\u0441\u0442\u043e\u044f\u043d\u043d\u044b\u0439 \u043d\u0430\u0432\u044b\u043a \u0432\u044b\u0448\u0435 5", guaranteed)] if guaranteed else []),
     )
 
 
@@ -770,6 +804,10 @@ class SkillEditModal(discord.ui.Modal, title="Редактирование на�
             self.add_item(field)
 
     async def on_submit(self, interaction: discord.Interaction):
+        current = await bot.db.character(interaction.guild_id, interaction.user.id)
+        if not current or int(current.get("skills_initialized", 1)):
+            await interaction.response.send_message("Стартовое распределение уже завершено; далее навыки покупаются за БС.", ephemeral=True)
+            return
         try:
             values = {name: int(field.value) for name, field in self.fields.items()}
         except ValueError:
@@ -789,6 +827,8 @@ class SkillGroupActionsView(discord.ui.View):
         super().__init__(timeout=180)
         self.character = character
         self.group = group
+        if int(character.get("skills_initialized", 1)):
+            self.remove_item(self.edit)
 
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
         if interaction.user.id != self.character["user_id"]:
@@ -799,8 +839,10 @@ class SkillGroupActionsView(discord.ui.View):
     @discord.ui.button(label="Редактировать", style=discord.ButtonStyle.primary)
     async def edit(self, interaction: discord.Interaction, _: discord.ui.Button):
         current = await bot.db.character(interaction.guild_id, interaction.user.id)
-        if current:
+        if current and not int(current.get("skills_initialized", 1)):
             await interaction.response.send_modal(SkillEditModal(current, self.group))
+        else:
+            await interaction.response.send_message("Стартовое распределение уже завершено; используйте /навык-купить.", ephemeral=True)
 
 
 class SkillCategoriesView(discord.ui.View):
@@ -1346,9 +1388,12 @@ def can_purchase(character: dict, item: dict, category: str) -> bool:
 
 def store_price(character: dict, item: dict) -> int:
     price = int(item.get("price") or 0)
-    if price > 0 and "Бюрократия" in character.get("talents", {}):
-        price = max(1, price - 1)
-    return price
+    if price <= 0:
+        return price
+    discount = 1 if "\u0411\u044e\u0440\u043e\u043a\u0440\u0430\u0442\u0438\u044f" in character.get("talents", {}) else 0
+    if character_supply_level(character) > 6:
+        discount += 1
+    return max(1, price - discount)
 
 
 def visible_store_items(character: dict, items: list[dict], category: str) -> list[dict]:
@@ -1527,7 +1572,14 @@ class StoreView(discord.ui.View):
         if not success:
             await interaction.response.send_message(message, ephemeral=True)
             return
+        base_price = int(item.get("price") or 0)
+        paid = store_price(self.character, item)
+        discount = max(0, base_price - paid)
         await self.refresh(interaction)
+        await interaction.followup.send(
+            f'{interaction.user.mention} \u043f\u043e\u043a\u0443\u043f\u0430\u0435\u0442 **{item["name"]}** \u0437\u0430 **{paid} \u0411\u0421**. \u0421\u043a\u0438\u0434\u043a\u0430: **{discount} \u0411\u0421**.',
+            ephemeral=False,
+        )
 
 
 TALENT_PAGE_SIZE = 5
@@ -1537,7 +1589,24 @@ def class_starter_names(class_name: str) -> tuple[str, ...]:
     return tuple(talent["name"] for talent in CLASS_TALENTS[class_name])
 
 
-def available_talents(character: dict) -> list[dict]:
+def talent_requirements_met(character: dict, talent: dict) -> bool:
+    if talent.get("class_name") and talent["class_name"] != character["class_name"]:
+        return False
+    if int(talent.get("rank_required", 0)) > int(character["rank_index"]):
+        return False
+    skills = character.get("skills", {})
+    return all(int(skills.get(skill, -3)) >= int(level) for skill, level in talent.get("skill_requirements", {}).items())
+
+
+def talent_requirement_text(talent: dict) -> str:
+    parts = [f'звание {RANKS[int(talent.get("rank_required", 0))]}']
+    if talent.get("class_name"):
+        parts.append(f'класс {talent["class_name"]}')
+    parts.extend(f"{skill} {level}" for skill, level in talent.get("skill_requirements", {}).items())
+    return " · ".join(parts)
+
+
+def available_talents(character: dict):
     owned = {name.casefold() for name in character.get("talents", {})}
     starters = class_starter_names(character["class_name"])
     if not any(name.casefold() in owned for name in starters):
@@ -1548,10 +1617,10 @@ def available_talents(character: dict) -> list[dict]:
         ]
     return [
         talent for talent in TALENTS
-        if talent["kind"] in {"general", "class_progression"}
-        and (not talent["class_name"] or talent["class_name"] == character["class_name"])
+        if talent["kind"] in {"general", "class_progression", "skill"}
+        and talent_requirements_met(character, talent)
         and talent["name"].casefold() not in owned
-        and int(talent["rank_required"]) <= int(character["rank_index"])
+
     ]
 
 
@@ -1579,7 +1648,8 @@ def build_talent_embed(character: dict, mode: str, page: int) -> discord.Embed:
         rank = RANKS[int(talent["rank_required"])]
         price = f'{talent["price"]} БС' if talent["price"] else "стартовый"
         lines.append(
-            f'**{talent["name"]}** · {price} · от звания {rank}\n'
+            f'**{talent["name"]}** · {price}\n'
+            f'Требования: {talent_requirement_text(talent)}\n'
             f'└─ {talent["description"]}'
         )
     embed = discord.Embed(
@@ -1689,6 +1759,7 @@ class TalentView(discord.ui.View):
             int(talent["rank_required"]),
             talent["class_name"],
             starters,
+            talent.get("skill_requirements", {}),
         )
         if not success:
             await interaction.response.send_message(message, ephemeral=True)
@@ -1934,7 +2005,9 @@ class AttackView(discord.ui.View):
         self.damage_modifier = damage_modifier
         self.resolved = False
         self.message: discord.Message | None = None
-        self.push_button.disabled = ranged
+        fire_rate = int((weapon or {}).get("fire_rate") or 1)
+        calm_trigger = not attacker_npc and has_talent(attacker, "\u0421\u043f\u043e\u043a\u043e\u0439\u043d\u044b\u0439 \u0441\u043f\u0443\u0441\u043a") and fire_rate == 1
+        self.push_button.disabled = ranged and not (attacker_npc or calm_trigger)
         if target_id is None:
             self.remove_item(self.defend_button)
             self.remove_item(self.refuse_button)
@@ -2073,29 +2146,24 @@ class AttackView(discord.ui.View):
         if self.resolved or interaction.user.id != self.attacker_id:
             await interaction.response.send_message("Эта кнопка сейчас недоступна.", ephemeral=True)
             return
-        pool = self.pools[0]
-        pool.push()
+        for pool in self.pools:
+            pool.push()
+        costs = []
         if self.attacker_npc:
-            ones = sum(value == 1 for value in pool.attribute_dice)
-            new_ones = max(0, ones - pool.charged_attribute_ones)
-            costs = []
-            if new_ones:
-                before, after = await bot.db.damage_npc_attribute(
-                    self.attacker_npc["id"], pool.attribute, new_ones
-                )
-                maximum = (
-                    self.attacker_npc["physique_max"]
-                    if pool.attribute == "Телосложение"
-                    else self.attacker_npc["agility_max"]
-                )
-                costs.append(
-                    f'{self.attacker_npc["name"]} · {pool.attribute}: '
-                    f'{before}/{maximum} → {after}/{maximum}'
-                )
-                pool.charged_attribute_ones = ones
+            for pool in self.pools:
+                ones = sum(value == 1 for value in pool.attribute_dice)
+                new_ones = max(0, ones - pool.charged_attribute_ones)
+                if new_ones:
+                    before, after = await bot.db.damage_npc_attribute(
+                        self.attacker_npc["id"], pool.attribute, new_ones
+                    )
+                    maximum = self.attacker_npc["physique_max"] if pool.attribute == "\u0422\u0435\u043b\u043e\u0441\u043b\u043e\u0436\u0435\u043d\u0438\u0435" else self.attacker_npc["agility_max"]
+                    costs.append(f'{self.attacker_npc["name"]} \u00b7 {pool.attribute}: {before}/{maximum} \u2192 {after}/{maximum}')
+                    pool.charged_attribute_ones = ones
         else:
             current = await bot.db.character(interaction.guild_id, self.attacker_id)
-            costs = await apply_push_cost(pool, current)
+            for pool in self.pools:
+                costs.extend(await apply_push_cost(pool, current))
         embed = self.attack_embed()
         if costs:
             embed.add_field(name="Цена риска", value=short("\n".join(costs)), inline=False)
@@ -2275,6 +2343,76 @@ async def skills_command(interaction: discord.Interaction, участник: dis
         inline=False,
     )
     await interaction.response.send_message(embed=embed, ephemeral=True)
+
+
+@bot.tree.command(name="навыки-завершить", description="Зафиксировать стартовое распределение навыков")
+async def finalize_skills_command(interaction: discord.Interaction):
+    character = await bot.db.character(interaction.guild_id, interaction.user.id)
+    if not character:
+        await interaction.response.send_message("Сначала зарегистрируйте персонажа.", ephemeral=True)
+        return
+    success, message = await bot.db.finalize_starting_skills(
+        character["id"], starting_skill_budget(character["race"])
+    )
+    await interaction.response.send_message(message, ephemeral=True)
+
+
+@bot.tree.command(name="навык-купить", description="Повысить навык на 1 за 8 БС")
+async def purchase_skill_command(interaction: discord.Interaction, навык: str):
+    character = await bot.db.character(interaction.guild_id, interaction.user.id)
+    if not character:
+        await interaction.response.send_message("Сначала зарегистрируйте персонажа.", ephemeral=True)
+        return
+    skill = normalize(навык, tuple(character["skills"]))
+    if not skill:
+        await interaction.response.send_message("Навык не найден.", ephemeral=True)
+        return
+    success, message, _ = await bot.db.purchase_skill(
+        character["id"], skill, character_skill_cap(character, skill), 8
+    )
+    await interaction.response.send_message(message, ephemeral=not success)
+
+
+@purchase_skill_command.autocomplete("навык")
+async def purchase_skill_autocomplete(interaction: discord.Interaction, current: str):
+    character = await bot.db.character(interaction.guild_id, interaction.user.id)
+    if not character:
+        return []
+    return [app_commands.Choice(name=name, value=name) for name in character["skills"] if current.casefold() in name.casefold()][:25]
+
+
+@bot.tree.command(name="навык-изменить", description="Администратор: прибавить или отнять постоянный уровень навыка")
+@app_commands.choices(операция=[
+    app_commands.Choice(name="Плюс", value="plus"),
+    app_commands.Choice(name="Минус", value="minus"),
+])
+@app_commands.check(require_master_access)
+async def adjust_skill_command(
+    interaction: discord.Interaction,
+    участник: discord.Member,
+    навык: str,
+    операция: app_commands.Choice[str],
+    цифра: app_commands.Range[int, 1, 20],
+):
+    character = await bot.db.character(interaction.guild_id, участник.id)
+    if not character:
+        await interaction.response.send_message("У участника нет персонажа.", ephemeral=True)
+        return
+    skill = normalize(навык, tuple(character["skills"]))
+    if not skill:
+        await interaction.response.send_message("Навык не найден.", ephemeral=True)
+        return
+    delta = цифра if операция.value == "plus" else -цифра
+    before, after = await bot.db.adjust_skill(character["id"], skill, delta)
+    await interaction.response.send_message(
+        f'{участник.mention} · **{skill}**: {before:+d} → {after:+d}.', ephemeral=True
+    )
+
+
+@adjust_skill_command.autocomplete("навык")
+async def adjust_skill_autocomplete(interaction: discord.Interaction, current: str):
+    names = tuple(dict.fromkeys((*SKILL_ATTRIBUTES, *CLASSES.values())))
+    return [app_commands.Choice(name=name, value=name) for name in names if current.casefold() in name.casefold()][:25]
 
 
 @bot.tree.command(name="удалить-персонажа", description="Безвозвратно удалить своего персонажа")
@@ -2530,13 +2668,13 @@ async def supply_transfer(
 async def store_command(interaction: discord.Interaction):
     character = await bot.db.character(interaction.guild_id, interaction.user.id)
     if not character:
-        await interaction.response.send_message("Сначала зарегистрируйте персонажа.", ephemeral=True)
+        await interaction.response.send_message("Сначала зарегистрируйте персонажа.", ephemeral=False)
         return
     items = await bot.db.catalog_items(interaction.guild_id, "", 500)
     await interaction.response.send_message(
         embed=build_store_embed(character, items, "Снаряжение", 0),
         view=StoreView(character, items),
-        ephemeral=True,
+        ephemeral=False,
     )
 
 
@@ -2849,14 +2987,16 @@ async def send_attack(
     success_modifier = equipment_success_modifier(equipped_items, skill)
     success_modifier += talent_equipment_success_modifier(attacker, equipped_items, skill)
     success_modifier += active_success_modifier(active_effects, SKILL_ATTRIBUTES[skill])
-    pools = [
-        make_pool(
-            attacker, skill, bonus - penalty + auto_modifier + distance_modifier, gear,
+    pools = []
+    for shot_index in range(shots):
+        pool = make_pool(
+            attacker, skill, bonus - penalty + auto_modifier + distance_modifier - shot_index, gear,
             success_modifier=success_modifier,
             attribute_override=attribute_override,
         )
-        for _ in range(shots)
-    ]
+        if shot_index:
+            pool.skill_modifier_details.append((f"\u041f\u043e\u0441\u043b\u0435\u0434\u0443\u044e\u0449\u0438\u0439 \u0432\u044b\u0441\u0442\u0440\u0435\u043b \u2116{shot_index + 1}", -shot_index))
+        pools.append(pool)
     if npc:
         npc_current = int(npc["physique"] if target_attribute == "Телосложение" else npc["agility"])
         if npc_current <= 0:
@@ -3423,16 +3563,17 @@ async def send_npc_attack(
     attribute_value = int(npc["agility"] if ranged else npc["physique"])
     skill_name = "Стрельба" if ranged else "Драка"
     skill_value = int(npc["shooting_skill"] if ranged else npc["fight_skill"]) + bonus - penalty
-    pools = [
-        RollPool(
+    pools = []
+    for attack_index in range(attacks):
+        adjusted_skill = skill_value - attack_index
+        pools.append(RollPool(
             attribute=attribute,
             skill=skill_name,
             attribute_dice=d6(attribute_value),
-            skill_dice=d6(max(0, skill_value)),
-            negative_dice=d6(max(0, -skill_value)),
-        )
-        for _ in range(attacks)
-    ]
+            skill_dice=d6(max(0, adjusted_skill)),
+            negative_dice=d6(max(0, -adjusted_skill)),
+            skill_modifier_details=([(f"\u041f\u043e\u0441\u043b\u0435\u0434\u0443\u044e\u0449\u0438\u0439 \u0432\u044b\u0441\u0442\u0440\u0435\u043b \u2116{attack_index + 1}", -attack_index)] if ranged and attack_index else []),
+        ))
     damage = int(npc["ranged_damage"] if ranged else npc["melee_damage"])
     weapon = {
         "name": f'{npc["name"]} · {skill_name}',
@@ -3660,6 +3801,132 @@ def catalog_item_embed(item: dict) -> discord.Embed:
     if modifiers:
         embed.add_field(name="Модификаторы", value="\n".join(modifiers), inline=False)
     return embed
+
+
+ADMIN_CATALOG_PAGE_SIZE = 5
+
+
+def admin_catalog_embed(items: list[dict], page: int, edit_prices: bool) -> discord.Embed:
+    pages = max(1, (len(items) + ADMIN_CATALOG_PAGE_SIZE - 1) // ADMIN_CATALOG_PAGE_SIZE)
+    page = max(0, min(page, pages - 1))
+    shown = items[page * ADMIN_CATALOG_PAGE_SIZE:(page + 1) * ADMIN_CATALOG_PAGE_SIZE]
+    lines = [
+        f'**{item["name"]}** · {item.get("category") or "—"} · **{int(item.get("price") or 0)} БС**'
+        for item in shown
+    ]
+    embed = discord.Embed(
+        title="Редактирование цен" if edit_prices else "Все предметы",
+        description="\n".join(lines) or "Каталог пуст.",
+        color=0x745B38,
+    )
+    embed.set_footer(text=f"Страница {page + 1}/{pages} · выберите предмет")
+    return embed
+
+
+class PriceEditModal(discord.ui.Modal, title="Изменить цену предмета"):
+    цена = discord.ui.TextInput(label="Новая цена в БС", min_length=1, max_length=6)
+
+    def __init__(self, item: dict):
+        super().__init__()
+        self.item = item
+        self.цена.default = str(int(item.get("price") or 0))
+
+    async def on_submit(self, interaction: discord.Interaction):
+        try:
+            price = int(self.цена.value)
+        except ValueError:
+            await interaction.response.send_message("Цена должна быть целым числом.", ephemeral=True)
+            return
+        if price < 0:
+            await interaction.response.send_message("Цена не может быть отрицательной.", ephemeral=True)
+            return
+        await bot.db.update_catalog_price(self.item["name"], price)
+        await interaction.response.send_message(
+            f'Цена **{self.item["name"]}** изменена на **{price} БС** во всём каталоге.',
+            ephemeral=True,
+        )
+
+
+class AdminCatalogSelect(discord.ui.Select):
+    def __init__(self, parent: "AdminCatalogView", shown: list[dict]):
+        self.parent_view = parent
+        super().__init__(
+            placeholder="Выберите предмет",
+            options=[
+                discord.SelectOption(
+                    label=item["name"][:100],
+                    value=str(item["id"]),
+                    description=f'{item.get("category") or "—"} · {int(item.get("price") or 0)} БС'[:100],
+                ) for item in shown
+            ],
+        )
+
+    async def callback(self, interaction: discord.Interaction):
+        item = self.parent_view.by_id[int(self.values[0])]
+        if self.parent_view.edit_prices:
+            await interaction.response.send_modal(PriceEditModal(item))
+        else:
+            await interaction.response.edit_message(embed=catalog_item_embed(item), view=self.parent_view)
+
+
+class AdminCatalogView(discord.ui.View):
+    def __init__(self, items: list[dict], edit_prices: bool = False, page: int = 0):
+        super().__init__(timeout=600)
+        self.items = items
+        self.by_id = {int(item["id"]): item for item in items}
+        self.edit_prices = edit_prices
+        self.pages = max(1, (len(items) + ADMIN_CATALOG_PAGE_SIZE - 1) // ADMIN_CATALOG_PAGE_SIZE)
+        self.page = max(0, min(page, self.pages - 1))
+        shown = items[self.page * ADMIN_CATALOG_PAGE_SIZE:(self.page + 1) * ADMIN_CATALOG_PAGE_SIZE]
+        if shown:
+            self.add_item(AdminCatalogSelect(self, shown))
+        self.previous.disabled = self.page == 0
+        self.next.disabled = self.page >= self.pages - 1
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        try:
+            await require_master_access(interaction)
+            return True
+        except app_commands.CheckFailure:
+            await interaction.response.send_message("Недостаточно прав.", ephemeral=True)
+            return False
+
+    async def refresh(self, interaction: discord.Interaction, page: int):
+        fresh = await bot.db.catalog_items(interaction.guild_id, "", 500)
+        view = AdminCatalogView(fresh, self.edit_prices, page)
+        await interaction.response.edit_message(
+            embed=admin_catalog_embed(fresh, view.page, self.edit_prices), view=view
+        )
+
+    @discord.ui.button(label="←", style=discord.ButtonStyle.secondary, row=1)
+    async def previous(self, interaction: discord.Interaction, _: discord.ui.Button):
+        await self.refresh(interaction, self.page - 1)
+
+    @discord.ui.button(label="→", style=discord.ButtonStyle.secondary, row=1)
+    async def next(self, interaction: discord.Interaction, _: discord.ui.Button):
+        await self.refresh(interaction, self.page + 1)
+
+
+@bot.tree.command(name="все-предметы", description="Администратор: листать каталог и смотреть каждый предмет")
+@app_commands.check(require_master_access)
+async def all_items_command(interaction: discord.Interaction):
+    items = await bot.db.catalog_items(interaction.guild_id, "", 500)
+    await interaction.response.send_message(
+        embed=admin_catalog_embed(items, 0, False),
+        view=AdminCatalogView(items),
+        ephemeral=True,
+    )
+
+
+@bot.tree.command(name="редактировать-цены", description="Администратор: выбрать предмет и изменить его цену везде")
+@app_commands.check(require_master_access)
+async def edit_prices_command(interaction: discord.Interaction):
+    items = await bot.db.catalog_items(interaction.guild_id, "", 500)
+    await interaction.response.send_message(
+        embed=admin_catalog_embed(items, 0, True),
+        view=AdminCatalogView(items, edit_prices=True),
+        ephemeral=True,
+    )
 
 
 @bot.tree.command(name="предметы-просмотр", description="Посмотреть описание и характеристики предмета")

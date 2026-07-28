@@ -32,6 +32,7 @@ CREATE TABLE IF NOT EXISTS characters (
     hands INTEGER NOT NULL DEFAULT 2,
     photo_path TEXT,
     notes TEXT NOT NULL DEFAULT '',
+    skills_initialized INTEGER NOT NULL DEFAULT 1,
     created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
     UNIQUE(guild_id, user_id)
 );
@@ -93,6 +94,10 @@ CREATE TABLE IF NOT EXISTS item_catalog (
     armor_slot TEXT,
     created_by INTEGER NOT NULL,
     UNIQUE(guild_id, name)
+);
+CREATE TABLE IF NOT EXISTS item_price_overrides (
+    name TEXT PRIMARY KEY,
+    price INTEGER NOT NULL CHECK(price >= 0)
 );
 CREATE TABLE IF NOT EXISTS inventory (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -174,6 +179,8 @@ class Database:
                 await db.execute("UPDATE characters SET hands=4 WHERE race='Тараканы'")
             if "rat_recovery_at" not in character_columns:
                 await db.execute("ALTER TABLE characters ADD COLUMN rat_recovery_at TEXT")
+            if "skills_initialized" not in character_columns:
+                await db.execute("ALTER TABLE characters ADD COLUMN skills_initialized INTEGER NOT NULL DEFAULT 1")
             inventory_columns = {row["name"] for row in await db.execute_fetchall("PRAGMA table_info(inventory)")}
             if "equipped" not in inventory_columns:
                 await db.execute("ALTER TABLE inventory ADD COLUMN equipped INTEGER NOT NULL DEFAULT 0")
@@ -220,6 +227,8 @@ class Database:
             await db.execute(
                 "UPDATE talents SET name='Солдат удачи' WHERE name='Проверка магазина'"
             )
+            await db.execute("UPDATE talents SET name='Пересчитать стволы' WHERE name='Считать стволы'")
+            await db.execute("UPDATE talents SET name='Дедовщина' WHERE name='Надавить званием'")
             for talent in TALENTS:
                 await db.execute(
                     "UPDATE talents SET description=? WHERE lower(name)=lower(?)",
@@ -359,19 +368,26 @@ class Database:
                             "UPDATE inventory SET durability=? WHERE id=?",
                             (migrated, issued["id"]),
                         )
+            overrides = await db.execute_fetchall("SELECT name,price FROM item_price_overrides")
+            for override in overrides:
+                await db.execute(
+                    "UPDATE item_catalog SET price=? WHERE lower(name)=lower(?)",
+                    (override["price"], override["name"]),
+                )
             await db.commit()
         return len(items)
 
     async def create_character(self, guild_id: int, user_id: int, surname: str, name: str, class_name: str, race: str) -> int:
         async with self.connect() as db:
             cursor = await db.execute(
-                "INSERT INTO characters(guild_id,user_id,surname,name,class_name,race,hands) VALUES(?,?,?,?,?,?,?) "
-                "ON CONFLICT(guild_id,user_id) DO UPDATE SET surname=excluded.surname,name=excluded.name,class_name=excluded.class_name,race=excluded.race,hands=excluded.hands",
+                "INSERT INTO characters(guild_id,user_id,surname,name,class_name,race,hands,skills_initialized) VALUES(?,?,?,?,?,?,?,0) "
+                "ON CONFLICT(guild_id,user_id) DO UPDATE SET surname=excluded.surname,name=excluded.name,class_name=excluded.class_name,race=excluded.race,hands=excluded.hands,skills_initialized=0",
                 (guild_id, user_id, surname, name, class_name, race, 4 if race == "Тараканы" else 2),
             )
             await db.commit()
             row = await db.execute_fetchall("SELECT id FROM characters WHERE guild_id=? AND user_id=?", (guild_id, user_id))
             character_id = int(row[0]["id"])
+            await db.execute("DELETE FROM skills WHERE character_id=?", (character_id,))
             class_skills = tuple(CLASSES.values())
             placeholders = ",".join("?" for _ in class_skills)
             await db.execute(
@@ -420,6 +436,59 @@ class Database:
     async def set_skill(self, character_id: int, name: str, value: int) -> None:
         async with self.connect() as db:
             await db.execute("INSERT INTO skills VALUES(?,?,?) ON CONFLICT(character_id,name) DO UPDATE SET value=excluded.value", (character_id, name, value))
+            await db.commit()
+
+    async def finalize_starting_skills(self, character_id: int, budget: int) -> tuple[bool, str]:
+        async with self.connect() as db:
+            character = await db.execute_fetchall("SELECT skills_initialized FROM characters WHERE id=?", (character_id,))
+            if not character:
+                return False, "Персонаж не найден."
+            if int(character[0]["skills_initialized"]):
+                return False, "Стартовые навыки уже зафиксированы."
+            rows = await db.execute_fetchall("SELECT name,value FROM skills WHERE character_id=?", (character_id,))
+            values = [int(row["value"]) for row in rows]
+            if any(value < -5 or value > 5 for value in values):
+                return False, "Стартовые навыки должны быть от −5 до +5."
+            used = sum(value + 3 for value in values)
+            if used != budget:
+                return False, f"Нужно распределить ровно {budget} очков; сейчас распределено {used}."
+            await db.execute("UPDATE characters SET skills_initialized=1 WHERE id=?", (character_id,))
+            await db.commit()
+            return True, f"Распределение зафиксировано: {used}/{budget}."
+
+    async def purchase_skill(self, character_id: int, name: str, cap: int, price: int = 8) -> tuple[bool, str, int | None]:
+        async with self.connect() as db:
+            await db.execute("BEGIN IMMEDIATE")
+            chars = await db.execute_fetchall("SELECT supply_forms,skills_initialized FROM characters WHERE id=?", (character_id,))
+            rows = await db.execute_fetchall("SELECT value FROM skills WHERE character_id=? AND name=?", (character_id, name))
+            if not chars or not rows:
+                await db.rollback(); return False, "Персонаж или навык не найден.", None
+            if not int(chars[0]["skills_initialized"]):
+                await db.rollback(); return False, "Сначала завершите стартовое распределение навыков.", None
+            value = int(rows[0]["value"])
+            if value >= cap:
+                await db.rollback(); return False, f"Предел навыка — {cap}.", int(chars[0]["supply_forms"])
+            balance = int(chars[0]["supply_forms"])
+            if balance < price:
+                await db.rollback(); return False, f"Недостаточно БС: требуется {price}, доступно {balance}.", balance
+            await db.execute("UPDATE skills SET value=value+1 WHERE character_id=? AND name=?", (character_id, name))
+            await db.execute("UPDATE characters SET supply_forms=supply_forms-? WHERE id=?", (price, character_id))
+            await db.commit()
+            return True, f"Навык «{name}» повышен: {value} → {value+1} за {price} БС.", balance-price
+
+    async def adjust_skill(self, character_id: int, name: str, delta: int) -> tuple[int, int]:
+        async with self.connect() as db:
+            rows = await db.execute_fetchall("SELECT value FROM skills WHERE character_id=? AND name=?", (character_id, name))
+            if not rows: raise ValueError("Навык не найден")
+            before = int(rows[0]["value"]); after = max(-5, min(7, before + delta))
+            await db.execute("UPDATE skills SET value=? WHERE character_id=? AND name=?", (after, character_id, name))
+            await db.commit(); return before, after
+
+    async def update_catalog_price(self, name: str, price: int) -> None:
+        if price < 0: raise ValueError("Цена не может быть отрицательной")
+        async with self.connect() as db:
+            await db.execute("INSERT INTO item_price_overrides(name,price) VALUES(?,?) ON CONFLICT(name) DO UPDATE SET price=excluded.price", (name, price))
+            await db.execute("UPDATE item_catalog SET price=? WHERE lower(name)=lower(?)", (price, name))
             await db.commit()
 
     async def update_identity(self, character_id: int, surname: str, name: str) -> None:
@@ -864,15 +933,14 @@ class Database:
             if item["category"] == "Разное" or item["access"] == "Не продаётся":
                 await db.rollback()
                 return False, "Этот предмет нельзя приобрести в магазине.", None
-            if required_supply_level > 0:
-                skills = await db.execute_fetchall(
-                    "SELECT value FROM skills WHERE character_id=? AND name='Снабжение'",
-                    (character_id,),
-                )
-                level = int(skills[0]["value"]) if skills and character["class_name"] == "Снабженец" else -99
-                if level < required_supply_level:
-                    await db.rollback()
-                    return False, f"Требуется Снабжение {required_supply_level}.", None
+            skills = await db.execute_fetchall(
+                "SELECT value FROM skills WHERE character_id=? AND name='\u0421\u043d\u0430\u0431\u0436\u0435\u043d\u0438\u0435'",
+                (character_id,),
+            )
+            level = int(skills[0]["value"]) if skills and character["class_name"] == "\u0421\u043d\u0430\u0431\u0436\u0435\u043d\u0435\u0446" else -99
+            if required_supply_level > 0 and level < required_supply_level:
+                await db.rollback()
+                return False, f"\u0422\u0440\u0435\u0431\u0443\u0435\u0442\u0441\u044f \u0421\u043d\u0430\u0431\u0436\u0435\u043d\u0438\u0435 {required_supply_level}.", None
             price = int(item["price"] or 0)
             if price < 1:
                 await db.rollback()
@@ -881,8 +949,8 @@ class Database:
                 "SELECT 1 FROM talents WHERE character_id=? AND lower(name)=lower('Бюрократия') LIMIT 1",
                 (character_id,),
             )
-            if bureaucracy:
-                price = max(1, price - 1)
+            discount = (1 if bureaucracy else 0) + (1 if level > 6 else 0)
+            price = max(1, price - discount)
             balance = int(character["supply_forms"])
             if balance < price:
                 await db.rollback()
@@ -972,6 +1040,7 @@ class Database:
         rank_required: int,
         class_name: str | None = None,
         starter_names: tuple[str, ...] = (),
+        skill_requirements: dict[str, int] | None = None,
     ) -> tuple[bool, str, int | None]:
         async with self.connect() as db:
             await db.execute("BEGIN IMMEDIATE")
@@ -989,6 +1058,15 @@ class Database:
             if int(character["rank_index"]) < rank_required:
                 await db.rollback()
                 return False, "Текущее звание недостаточно для этого таланта.", None
+            for skill, required_level in (skill_requirements or {}).items():
+                rows = await db.execute_fetchall(
+                    "SELECT value FROM skills WHERE character_id=? AND name=?",
+                    (character_id, skill),
+                )
+                current_level = int(rows[0]["value"]) if rows else -3
+                if current_level < int(required_level):
+                    await db.rollback()
+                    return False, f"Требуется навык {skill} {required_level}; сейчас {current_level}.", None
             exists = await db.execute_fetchall(
                 "SELECT 1 FROM talents WHERE character_id=? AND lower(name)=lower(?) LIMIT 1",
                 (character_id, name),

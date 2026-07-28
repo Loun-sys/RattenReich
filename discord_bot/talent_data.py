@@ -4,6 +4,8 @@ rank — минимальный индекс звания (0 = Шутце), pric
 effects используются ботом для эффектов, которые можно рассчитать автоматически.
 """
 
+from talent_expansion import NEW_CLASS_TALENTS, SKILL_TALENTS
+
 CLASS_TALENTS = {
     "Снабженец": [
         {"name": "Связи в командовании", "description": "После выполненного полевого задания выдайте выбранному союзнику дополнительный Бланк Снабжения."},
@@ -124,7 +126,7 @@ CLASS_PROGRESSION_TALENTS = [
 ]
 
 
-def _record(name, description, rank, price, effects, kind="general", class_name=None, starter=False):
+def _record(name, description, rank, price, effects, kind="general", class_name=None, starter=False, skill_requirements=None):
     return {
         "name": name,
         "description": description,
@@ -134,6 +136,7 @@ def _record(name, description, rank, price, effects, kind="general", class_name=
         "kind": kind,
         "class_name": class_name,
         "starter": starter,
+        "skill_requirements": dict(skill_requirements or {}),
     }
 
 
@@ -148,6 +151,12 @@ TALENTS = [
 ] + [
     _record(name, description, rank, 16, {}, "class_progression", class_name, False)
     for class_name, rank, name, description in CLASS_PROGRESSION_TALENTS
+] + [
+    _record(name, description, rank, 16, effects, "class_progression", class_name, False, requirements)
+    for class_name, rank, requirements, name, description, effects in NEW_CLASS_TALENTS
+] + [
+    _record(name, description, rank, 16, effects, "skill", None, False, {skill: level, **extra})
+    for skill, level, rank, name, description, extra, effects in SKILL_TALENTS
 ]
 
 CLASS_RESTRICTED = {
@@ -163,7 +172,7 @@ for talent in TALENTS:
 
 # Исходная сила задаёт порядок распределения по званиям.
 _general = sorted(
-    (talent for talent in TALENTS if not talent["starter"] and talent["kind"] != "class_progression"),
+    (talent for talent in TALENTS if not talent["starter"] and talent["kind"] == "general"),
     key=lambda talent: (
         -1 if talent["name"] == "Девять жизней" else int(talent["rank_required"]),
         talent["name"],
