@@ -858,7 +858,7 @@ class SkillGroupActionsView(discord.ui.View):
         if current and not int(current.get("skills_initialized", 1)):
             await interaction.response.send_modal(SkillEditModal(current, self.group))
         else:
-            await interaction.response.send_message("Стартовое распределение уже завершено; используйте /навык-купить.", ephemeral=True)
+            await interaction.response.send_message("Стартовое распределение уже завершено; используйте /магазин-навыков.", ephemeral=True)
 
 
 class SkillCategoriesView(discord.ui.View):
@@ -2373,7 +2373,7 @@ async def finalize_skills_command(interaction: discord.Interaction):
     await interaction.response.send_message(message, ephemeral=True)
 
 
-@bot.tree.command(name="навык-купить", description="Повысить навык на 1 за 8 БС")
+@bot.tree.command(name="магазин-навыков", description="Повысить навык на 1 за 8 БС")
 async def purchase_skill_command(interaction: discord.Interaction, навык: str):
     character = await bot.db.character(interaction.guild_id, interaction.user.id)
     if not character:
