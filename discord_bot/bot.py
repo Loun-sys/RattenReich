@@ -1560,11 +1560,11 @@ class StoreView(discord.ui.View):
     async def armor(self, interaction: discord.Interaction, _: discord.ui.Button):
         await self.refresh(interaction, "Броня", 0)
 
-    @discord.ui.button(label="Разное", style=discord.ButtonStyle.secondary, row=1)
+    @discord.ui.button(label="Разное", style=discord.ButtonStyle.secondary, row=4)
     async def misc(self, interaction: discord.Interaction, _: discord.ui.Button):
         await self.refresh(interaction, "Разное", 0)
 
-    @discord.ui.button(label="Насадки", style=discord.ButtonStyle.secondary, row=4)
+    @discord.ui.button(label="Насадки", style=discord.ButtonStyle.primary, row=1)
     async def attachments(self, interaction: discord.Interaction, _: discord.ui.Button):
         await self.refresh(interaction, "Насадка", 0)
 
