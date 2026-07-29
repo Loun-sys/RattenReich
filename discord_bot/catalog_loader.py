@@ -15,6 +15,15 @@ REMOVED_SOURCE_NUMBERS = {55, 56, 58, 60}
 
 SUPPLY_LEVELS = ("I", "II", "III", "IV", "V")
 
+REDUCED_BASE_PRICES = {
+    "Общедоступное": 4,
+    "Снабжение I": 5,
+    "Снабжение II": 8,
+    "Снабжение III": 11,
+    "Снабжение IV": 15,
+    "Снабжение V": 23,
+}
+
 ACCESS_FLOORS = {
     "Общедоступное": 5,
     "Снабжение I": 7,
@@ -38,6 +47,34 @@ def _weapon_access(damage: int, gear: int) -> str:
     return "Снабжение V"
 
 
+def _weapon_price(item: dict[str, Any]) -> int:
+    base = REDUCED_BASE_PRICES[str(item["access"])]
+    damage = int(item.get("damage") or 0)
+    gear = int(item.get("gear") or 0)
+    hands = int(item.get("hands") or 0)
+    adjustment = damage - gear + (1 if damage >= 4 else 0)
+    if hands >= 2:
+        adjustment -= 1
+    if str(item.get("category") or "") == "Оружие дальнего боя":
+        use_range = str(item.get("use_range") or "")
+        adjustment += {"Нулевая": -1, "Средняя": 1, "Дальняя": 2}.get(use_range, 0)
+        fire_rate = int(item.get("fire_rate") or 0)
+        ammo = int(item.get("ammo_max") or 0)
+        adjustment += 1 if fire_rate >= 4 else 0
+        adjustment += 1 if ammo >= 6 else (-1 if ammo == 1 else 0)
+    return max(3, base + max(-3, min(3, adjustment)))
+
+
+def _protection_price(item: dict[str, Any]) -> int:
+    base = REDUCED_BASE_PRICES[str(item["access"])]
+    protection = int(item.get("defense") or item.get("gear") or 0)
+    is_large = str(item.get("armor_slot") or item.get("size") or "") == "Большой"
+    adjustment = (1 if is_large else 0) + max(0, protection - 3)
+    if str(item.get("category") or "") == "Щит" and int(item.get("hands") or 0) >= 2:
+        adjustment -= 1
+    return max(3, base + max(-2, min(4, adjustment)))
+
+
 def _balance_item(item: dict[str, Any]) -> dict[str, Any]:
     category = str(item.get("category") or "")
     if category.startswith("Оружие "):
@@ -53,8 +90,10 @@ def _balance_item(item: dict[str, Any]) -> dict[str, Any]:
         protection = max(0, int(item.get("defense") or item.get("gear") or 0))
         tier = min(5, max(0, protection - 1))
         item["access"] = "Общедоступное" if tier == 0 else f"Снабжение {SUPPLY_LEVELS[tier - 1]}"
-    if category.startswith("Оружие ") or category in {"Броня", "Щит"}:
-        item["price"] = max(int(item.get("price") or 0), ACCESS_FLOORS[item["access"]])
+    if category.startswith("Оружие "):
+        item["price"] = _weapon_price(item)
+    elif category in {"Броня", "Щит"}:
+        item["price"] = _protection_price(item)
     return item
 
 
