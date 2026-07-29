@@ -18,6 +18,7 @@ from discord import app_commands
 from discord.ext import commands, tasks
 from dotenv import load_dotenv
 
+from attachment_data import ATTACHMENT_BY_NAME, compatible
 from card_renderer import CardRenderer
 from constants import ATTRIBUTES, CLASSES, ITEM_CATEGORIES, ITEM_SIZES, RACES, RANGES, RANKS, SKILLS
 from database import Database
@@ -1563,6 +1564,10 @@ class StoreView(discord.ui.View):
     async def misc(self, interaction: discord.Interaction, _: discord.ui.Button):
         await self.refresh(interaction, "Разное", 0)
 
+    @discord.ui.button(label="Насадки", style=discord.ButtonStyle.secondary, row=4)
+    async def attachments(self, interaction: discord.Interaction, _: discord.ui.Button):
+        await self.refresh(interaction, "Насадка", 0)
+
     @discord.ui.button(label="←", style=discord.ButtonStyle.secondary, row=2)
     async def previous_page(self, interaction: discord.Interaction, _: discord.ui.Button):
         await self.refresh(interaction, page=self.page - 1)
@@ -1785,6 +1790,111 @@ class TalentView(discord.ui.View):
         await self.refresh(interaction, "Доступные", 0)
 
 
+async def weapon_modification_embed(character: dict, weapon_id: int | None) -> discord.Embed:
+    items = await bot.db.inventory(character["id"])
+    weapon = next((item for item in items if int(item["id"]) == weapon_id), None)
+    if not weapon:
+        return discord.Embed(
+            title="Модификация оружия",
+            description="Выберите конкретный экземпляр оружия. Затем выберите совместимую насадку и установите либо снимите её.",
+            color=0x6E654F,
+        )
+    installed = await bot.db.weapon_attachments(character["id"], weapon_id)
+    lines = [f'**{row["slot"]}:** {row["name"]}' for row in installed] or ["Насадки не установлены."]
+    lines += [
+        "",
+        f'Урон **{weapon["damage"]}** · качество **{max(0, int(weapon["durability"]) + int(weapon.get("attachment_gear_modifier") or 0))}**',
+        f'СКР **{weapon["fire_rate"]}** · БК **{weapon["ammo"]}/{weapon["ammo_max"]}**',
+        f'Дистанция **{weapon["use_range"]}** · рук **{weapon["hands"]}**',
+        f'Бонус Стрельбы **{int(weapon.get("attachment_skill_bonus") or 0):+d}**',
+    ]
+    return discord.Embed(title=f'Модификация · {weapon["name"]} #{weapon_id}', description="\n".join(lines), color=0x6E654F)
+
+
+class WeaponModificationSelect(discord.ui.Select):
+    def __init__(self, owner, items):
+        self.owner_view = owner
+        super().__init__(
+            placeholder="1. Выберите оружие",
+            options=[
+                discord.SelectOption(label=f'{item["name"]} #{item["id"]}'[:100], value=str(item["id"]))
+                for item in items[:25]
+            ],
+            row=0,
+        )
+    async def callback(self, interaction):
+        self.owner_view.weapon_id = int(self.values[0])
+        await self.owner_view.refresh(interaction)
+
+
+class AttachmentModificationSelect(discord.ui.Select):
+    def __init__(self, owner, options):
+        self.owner_view = owner
+        super().__init__(placeholder="2. Выберите насадку", options=options[:25], row=1)
+    async def callback(self, interaction):
+        self.owner_view.attachment_id = int(self.values[0])
+        await interaction.response.defer()
+
+
+class WeaponModificationView(discord.ui.View):
+    def __init__(self, character: dict, items: list[dict], installed: list[dict], weapon_id: int | None = None):
+        super().__init__(timeout=240)
+        self.character = character
+        self.weapon_id = weapon_id
+        self.attachment_id = None
+        weapons = [item for item in items if item["category"] == "Оружие дальнего боя"]
+        if weapons:
+            self.add_item(WeaponModificationSelect(self, weapons))
+        weapon = next((item for item in weapons if int(item["id"]) == weapon_id), None)
+        if weapon:
+            installed_ids = {int(row["attachment_inventory_id"]) for row in installed}
+            occupied_elsewhere = {
+                int(row["attachment_inventory_id"]) for row in installed if int(row["weapon_inventory_id"]) != weapon_id
+            }
+            options = []
+            for item in items:
+                if item["category"] != "Насадка" or int(item["id"]) in occupied_elsewhere:
+                    continue
+                spec = ATTACHMENT_BY_NAME.get(item["name"])
+                if int(item["id"]) in installed_ids or (spec and compatible(spec, weapon)):
+                    options.append(discord.SelectOption(
+                        label=item["name"][:100], value=str(item["id"]),
+                        description=("установлено · " if int(item["id"]) in installed_ids else "") + str(spec["slot"]),
+                    ))
+            if options:
+                self.add_item(AttachmentModificationSelect(self, options))
+
+    async def refresh(self, interaction):
+        items = await bot.db.inventory(self.character["id"])
+        installed = await bot.db.weapon_attachments(self.character["id"])
+        await interaction.response.edit_message(
+            embed=await weapon_modification_embed(self.character, self.weapon_id),
+            view=WeaponModificationView(self.character, items, installed, self.weapon_id),
+        )
+
+    @discord.ui.button(label="Установить", style=discord.ButtonStyle.success, row=2)
+    async def install(self, interaction, _):
+        if not self.weapon_id or not self.attachment_id:
+            await interaction.response.send_message("Выберите оружие и насадку.", ephemeral=True)
+            return
+        success, message = await bot.db.install_attachment(self.character["id"], self.weapon_id, self.attachment_id)
+        if not success:
+            await interaction.response.send_message(message, ephemeral=True)
+            return
+        await self.refresh(interaction)
+
+    @discord.ui.button(label="Снять", style=discord.ButtonStyle.danger, row=2)
+    async def remove(self, interaction, _):
+        if not self.weapon_id or not self.attachment_id:
+            await interaction.response.send_message("Выберите установленную насадку.", ephemeral=True)
+            return
+        success, message = await bot.db.remove_attachment(self.character["id"], self.weapon_id, self.attachment_id)
+        if not success:
+            await interaction.response.send_message(message, ephemeral=True)
+            return
+        await self.refresh(interaction)
+
+
 class CharacterPanel(discord.ui.View):
     def __init__(self, client: RattenBot, owner_id: int | None = None):
         super().__init__(timeout=None)
@@ -1874,6 +1984,19 @@ class CharacterPanel(discord.ui.View):
         if character:
             await interaction.response.send_modal(NotesModal(character))
 
+
+    @discord.ui.button(label="Модифицировать оружие", style=discord.ButtonStyle.primary, custom_id="rr:weapon_mods", row=3)
+    async def weapon_mods(self, interaction: discord.Interaction, _: discord.ui.Button):
+        character = await get_character(interaction)
+        if not character:
+            return
+        items = await bot.db.inventory(character["id"])
+        installed = await bot.db.weapon_attachments(character["id"])
+        await interaction.response.send_message(
+            embed=await weapon_modification_embed(character, None),
+            view=WeaponModificationView(character, items, installed),
+            ephemeral=True,
+        )
 
 async def apply_push_cost(pool: RollPool, character: dict) -> list[str]:
     messages: list[str] = []
@@ -3148,7 +3271,7 @@ async def weapon_choices(interaction: discord.Interaction, current: str, categor
     items = [
         item for item in await bot.db.inventory(character["id"])
         if item["equipped"] and item["durability"] > 0
-        and item["category"] == category
+        and (item["category"] == category or (category == "Оружие ближнего боя" and int(item.get("attachment_melee_damage") or 0) > 0))
         and current.casefold() in item["name"].casefold()
     ]
     return [
@@ -3209,9 +3332,13 @@ async def melee_attack(
         return
     attacker = await bot.db.character(interaction.guild_id, interaction.user.id)
     weapon = await bot.db.inventory_item_by_name(attacker["id"], оружие, equipped_only=True) if attacker and оружие else None
-    if оружие and (not weapon or weapon["category"] != "Оружие ближнего боя" or weapon["durability"] <= 0):
-        await interaction.response.send_message("Выберите исправное экипированное оружие ближнего боя.", ephemeral=True)
+    if оружие and (not weapon or (weapon["category"] != "Оружие ближнего боя" and int(weapon.get("attachment_melee_damage") or 0) <= 0) or weapon["durability"] <= 0):
+        await interaction.response.send_message("Выберите исправное экипированное оружие ближнего боя или оружие со штыком.", ephemeral=True)
         return
+    if weapon and weapon["category"] == "Оружие дальнего боя" and int(weapon.get("attachment_melee_damage") or 0) > 0:
+        weapon = dict(weapon)
+        weapon["damage"] = int(weapon["attachment_melee_damage"])
+        weapon["damage_type"] = "Колющий"
     npc = await bot.db.npc(interaction.guild_id, нпс) if нпс else None
     if нпс and not npc:
         await interaction.response.send_message("Выбранный НПС не найден.", ephemeral=True)

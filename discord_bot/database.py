@@ -245,6 +245,14 @@ class Database:
                 "UPDATE talents SET name='Солдат удачи' WHERE name='Проверка магазина'"
             )
             await db.execute("UPDATE talents SET name='Пересчитать стволы' WHERE name='Считать стволы'")
+            attachment_renames = {
+                "Открытый траншейный прицел": "Траншейный прицел",
+                "Ремень быстрого хвата": "Ремень для быстрого хвата",
+                "Чок полного сужения": "Сужающий чок",
+                "Раструб траншейной зачистки": "Раструб",
+            }
+            for old_name, new_name in attachment_renames.items():
+                await db.execute("UPDATE item_catalog SET name=? WHERE name=?", (new_name, old_name))
             await db.execute("UPDATE talents SET name='Дедовщина' WHERE name='Надавить званием'")
             for talent in TALENTS:
                 await db.execute(
