@@ -1430,6 +1430,14 @@ def visible_store_items(character: dict, items: list[dict], category: str) -> li
     return visible
 
 
+def visible_purchasable_items(character: dict, items: list[dict]) -> list[dict]:
+    return [
+        item
+        for item in items
+        if can_purchase(character, item, store_category(item))
+    ]
+
+
 def store_page_items(character: dict, items: list[dict], category: str, page: int) -> tuple[list[dict], int, int]:
     filtered = visible_store_items(character, items, category)
     pages = max(1, (len(filtered) + STORE_PAGE_SIZE - 1) // STORE_PAGE_SIZE)
@@ -2890,6 +2898,59 @@ async def store_command(interaction: discord.Interaction):
         view=StoreView(character, items),
         ephemeral=False,
     )
+
+
+@bot.tree.command(name="купить", description="Купить доступный предмет по названию без листания магазина")
+@app_commands.describe(предмет="Точное название предмета из доступного вам магазина")
+async def buy_item_command(interaction: discord.Interaction, предмет: str):
+    character = await bot.db.character(interaction.guild_id, interaction.user.id)
+    if not character:
+        await interaction.response.send_message("Сначала зарегистрируйте персонажа.", ephemeral=True)
+        return
+    items = await bot.db.catalog_items(interaction.guild_id, "", 500)
+    visible = visible_purchasable_items(character, items)
+    item = next(
+        (candidate for candidate in visible if candidate["name"].casefold() == предмет.strip().casefold()),
+        None,
+    )
+    if not item:
+        await interaction.response.send_message(
+            "Этот предмет не найден среди доступных вам товаров магазина.",
+            ephemeral=True,
+        )
+        return
+    required = required_supply_level(item) or 0
+    success, message, _ = await bot.db.purchase_item(character["id"], item["id"], required)
+    if not success:
+        await interaction.response.send_message(message, ephemeral=True)
+        return
+    base_price = int(item.get("price") or 0)
+    paid = store_price(character, item)
+    discount = max(0, base_price - paid)
+    await interaction.response.send_message(
+        f'{interaction.user.mention} покупает **{item["name"]}** за **{paid} БС**. '
+        f'Скидка: **{discount} БС**.',
+        ephemeral=False,
+    )
+
+
+@buy_item_command.autocomplete("предмет")
+async def buy_item_autocomplete(interaction: discord.Interaction, current: str):
+    character = await bot.db.character(interaction.guild_id, interaction.user.id)
+    if not character:
+        return []
+    items = await bot.db.catalog_items(interaction.guild_id, "", 500)
+    query = current.casefold().strip()
+    visible = visible_purchasable_items(character, items)
+    matches = [item for item in visible if query in item["name"].casefold()]
+    matches.sort(key=lambda item: (not item["name"].casefold().startswith(query), item["name"].casefold()))
+    return [
+        app_commands.Choice(
+            name=f'{item["name"]} · {store_price(character, item)} БС'[:100],
+            value=item["name"][:100],
+        )
+        for item in matches[:25]
+    ]
 
 
 @bot.tree.command(name="магазин-талантов", description="Открыть магазин талантов за 16 Бланков Снабжения")
