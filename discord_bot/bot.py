@@ -100,6 +100,7 @@ class RattenBot(commands.Bot):
 
 bot = RattenBot()
 PENDING_ATTACKS: dict[tuple[int, int], "AttackView"] = {}
+LUCK_OWNER_ID = 338639020664029190
 MASTER_ROLE_IDS = frozenset({
     980168851658506269,
     980168851683696660,
@@ -500,6 +501,15 @@ def d6(count: int) -> list[int]:
     return [secrets.randbelow(6) + 1 for _ in range(max(0, count))]
 
 
+def d6_with_luck(count: int, luck_percent: int = 0) -> list[int]:
+    """Secretly shift the chance of rolling a six by percentage points."""
+    chance = max(0, min(10_000, 1667 + int(luck_percent) * 100))
+    return [
+        6 if secrets.randbelow(10_000) < chance else secrets.randbelow(5) + 1
+        for _ in range(max(0, count))
+    ]
+
+
 @dataclass
 class RollPool:
     attribute: str
@@ -515,6 +525,7 @@ class RollPool:
     minimum_successes: int = 0
     skill_modifier_details: list[tuple[str, int]] = field(default_factory=list)
     success_modifier_details: list[tuple[str, int]] = field(default_factory=list)
+    luck_percent: int = 0
 
     @property
     def successes(self) -> int:
@@ -524,11 +535,17 @@ class RollPool:
         return max(self.minimum_successes, result) if self.minimum_successes > 0 else result
 
     def push(self) -> None:
-        reroll_positive = lambda values: [value if value in (1, 6) else d6(1)[0] for value in values]
+        reroll_positive = lambda values: [
+            value if value in (1, 6) else d6_with_luck(1, self.luck_percent)[0]
+            for value in values
+        ]
         self.attribute_dice = reroll_positive(self.attribute_dice)
         self.skill_dice = reroll_positive(self.skill_dice)
         self.gear_dice = {item_id: reroll_positive(values) for item_id, values in self.gear_dice.items()}
-        self.negative_dice = [value if value == 6 else d6(1)[0] for value in self.negative_dice]
+        self.negative_dice = [
+            value if value == 6 else d6_with_luck(1, -self.luck_percent)[0]
+            for value in self.negative_dice
+        ]
         self.push_count += 1
 
 
@@ -561,17 +578,19 @@ def make_pool(
     maximum_rules = talent_effect(character, "max_attribute_for", {}) or {}
     attribute_value = character["attributes"][attribute]["max" if use_max_attribute or maximum_rules.get(skill) == attribute else "current"]
     minimum_rules = talent_effect(character, "minimum_success", {}) or {}
+    luck_percent = int(character.get("luck_percent") or 0)
     return RollPool(
         attribute=attribute,
         skill=skill,
-        attribute_dice=d6(int(attribute_value)),
-        skill_dice=d6(max(0, skill_total)),
-        negative_dice=d6(max(0, -skill_total)),
-        gear_dice={item_id: d6(count) for item_id, count in (gear or {}).items()},
+        attribute_dice=d6_with_luck(int(attribute_value), luck_percent),
+        skill_dice=d6_with_luck(max(0, skill_total), luck_percent),
+        negative_dice=d6_with_luck(max(0, -skill_total), -luck_percent),
+        gear_dice={item_id: d6_with_luck(count, luck_percent) for item_id, count in (gear or {}).items()},
         flat_success_modifier=success_modifier + guaranteed,
         minimum_successes=int(minimum_rules.get(skill, 0)),
         skill_modifier_details=modifier_details,
         success_modifier_details=([("\u041f\u043e\u0441\u0442\u043e\u044f\u043d\u043d\u044b\u0439 \u043d\u0430\u0432\u044b\u043a \u0432\u044b\u0448\u0435 5", guaranteed)] if guaranteed else []),
+        luck_percent=luck_percent,
     )
 
 
@@ -2569,6 +2588,7 @@ class AttackView(discord.ui.View):
         damage_reduction_modifier: int = 0,
     ):
         target = await bot.db.character(interaction.guild_id, self.target_id)
+        luck_percent = int(target.get("luck_percent") or 0)
         weapon_text = " ".join(
             str((self.weapon or {}).get(key) or "")
             for key in ("damage_type", "properties", "conditions")
@@ -2579,26 +2599,26 @@ class AttackView(discord.ui.View):
             if item["equipped"] and item["durability"] > 0 and item["category"] in {"Броня", "Щит"}
         ]
         armor_rolls = {
-            item["id"]: d6(int(item["durability"]))
+            item["id"]: d6_with_luck(int(item["durability"]), luck_percent)
             for item in equipped
             if item["category"] == "Броня" and not ignores_armor
         }
         armor_rolls.update({
-            item["id"]: d6(int(item["durability"]))
+            item["id"]: d6_with_luck(int(item["durability"]), luck_percent)
             for item in equipped
             if item["category"] == "Щит"
         })
         indestructible_rolls = {}
-        custom_defense_rolls = d6(max(0, extra_dice))
-        negative_defense_rolls = d6(max(0, -extra_dice))
+        custom_defense_rolls = d6_with_luck(max(0, extra_dice), luck_percent)
+        negative_defense_rolls = d6_with_luck(max(0, -extra_dice), -luck_percent)
         for item in equipped:
             if ignores_armor and item["category"] == "Броня":
                 continue
             count = armor_indestructible_dice(item, self.weapon, self.distance)
             if count:
-                indestructible_rolls[item["name"]] = d6(count)
+                indestructible_rolls[item["name"]] = d6_with_luck(count, luck_percent)
         if target["race"] == "Тараканы" and not ignores_armor:
-            indestructible_rolls["Хитиновая броня"] = d6(2)
+            indestructible_rolls["Хитиновая броня"] = d6_with_luck(2, luck_percent)
         successes = sum(value == 6 for values in armor_rolls.values() for value in values)
         successes += sum(
             value == 6
@@ -4831,6 +4851,33 @@ async def item_create_error(interaction: discord.Interaction, error: app_command
         await interaction.response.send_message(MASTER_ACCESS_ERROR, ephemeral=True)
     else:
         raise error
+
+
+@bot.event
+async def on_message(message: discord.Message):
+    if message.author.bot:
+        return
+    if message.guild is None and message.author.id == LUCK_OWNER_ID:
+        content = message.content.strip()
+        match = re.fullmatch(r"!?удача\s+(?:<@!?(\d+)>|(\d+))\s+([+-]\d+|0)", content, re.IGNORECASE)
+        if match:
+            target_id = int(match.group(1) or match.group(2))
+            percent = max(-100, min(100, int(match.group(3))))
+            await bot.db.set_luck_modifier(target_id, percent)
+            effective = max(0.0, min(100.0, 100 / 6 + percent))
+            await message.reply(
+                f"Удача для `{target_id}`: **{percent:+d}%**. "
+                f"Шанс успеха каждого положительного куба: **{effective:.2f}%**.",
+                mention_author=False,
+            )
+            return
+        if content.casefold() in {"удача", "!удача"}:
+            await message.reply(
+                "Формат: `удача ID +10`, `удача ID -10` или `удача ID 0`.",
+                mention_author=False,
+            )
+            return
+    await bot.process_commands(message)
 
 
 @bot.event

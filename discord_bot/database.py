@@ -113,6 +113,11 @@ CREATE TABLE IF NOT EXISTS purchase_orders (
     reviewed_by INTEGER
 );
 CREATE INDEX IF NOT EXISTS idx_purchase_orders_guild_status ON purchase_orders(guild_id,status,ordered_at);
+CREATE TABLE IF NOT EXISTS luck_modifiers (
+    user_id INTEGER PRIMARY KEY,
+    percent INTEGER NOT NULL DEFAULT 0 CHECK(percent BETWEEN -100 AND 100),
+    updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
 CREATE TABLE IF NOT EXISTS inventory (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     character_id INTEGER NOT NULL REFERENCES characters(id) ON DELETE CASCADE,
@@ -459,7 +464,27 @@ class Database:
             result["skills"] = {r["name"]: r["value"] for r in skills}
             result["talents"] = {r["name"]: r["description"] for r in talents}
             result["injuries"] = [dict(r) for r in injuries]
+            luck = await db.execute_fetchall("SELECT percent FROM luck_modifiers WHERE user_id=?", (user_id,))
+            result["luck_percent"] = int(luck[0]["percent"]) if luck else 0
             return result
+
+    async def set_luck_modifier(self, user_id: int, percent: int) -> None:
+        percent = max(-100, min(100, int(percent)))
+        async with self.connect() as db:
+            if percent:
+                await db.execute(
+                    """INSERT INTO luck_modifiers(user_id,percent,updated_at) VALUES(?,?,CURRENT_TIMESTAMP)
+                       ON CONFLICT(user_id) DO UPDATE SET percent=excluded.percent,updated_at=CURRENT_TIMESTAMP""",
+                    (user_id, percent),
+                )
+            else:
+                await db.execute("DELETE FROM luck_modifiers WHERE user_id=?", (user_id,))
+            await db.commit()
+
+    async def get_luck_modifier(self, user_id: int) -> int:
+        async with self.connect() as db:
+            rows = await db.execute_fetchall("SELECT percent FROM luck_modifiers WHERE user_id=?", (user_id,))
+            return int(rows[0]["percent"]) if rows else 0
 
     async def delete_character(self, guild_id: int, user_id: int) -> str | None:
         async with self.connect() as db:
