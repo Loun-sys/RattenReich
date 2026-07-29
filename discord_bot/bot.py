@@ -1608,9 +1608,129 @@ class StoreView(discord.ui.View):
         discount = max(0, base_price - paid)
         await self.refresh(interaction)
         await interaction.followup.send(
-            f'{interaction.user.mention} \u043f\u043e\u043a\u0443\u043f\u0430\u0435\u0442 **{item["name"]}** \u0437\u0430 **{paid} \u0411\u0421**. \u0421\u043a\u0438\u0434\u043a\u0430: **{discount} \u0411\u0421**.',
+            f'{interaction.user.mention} \u0437\u0430\u043a\u0430\u0437\u044b\u0432\u0430\u0435\u0442 **{item["name"]}** \u0437\u0430 **{paid} \u0411\u0421**. \u0421\u043a\u0438\u0434\u043a\u0430: **{discount} \u0411\u0421**. \u0417\u0430\u044f\u0432\u043a\u0430 \u043e\u0436\u0438\u0434\u0430\u0435\u0442 \u0440\u0435\u0448\u0435\u043d\u0438\u044f \u0441\u043d\u0430\u0431\u0436\u0435\u043d\u0438\u044f.',
             ephemeral=False,
         )
+
+
+SUPPLY_ORDER_PAGE_SIZE = 5
+
+
+def build_supply_orders_embed(orders: list[dict], page: int) -> discord.Embed:
+    pages = max(1, (len(orders) + SUPPLY_ORDER_PAGE_SIZE - 1) // SUPPLY_ORDER_PAGE_SIZE)
+    page = max(0, min(page, pages - 1))
+    visible = orders[page * SUPPLY_ORDER_PAGE_SIZE:(page + 1) * SUPPLY_ORDER_PAGE_SIZE]
+    lines = [
+        f'**#{order["id"]} · <@{order["user_id"]}> · {order["surname"]} {order["name"]}**\n'
+        f'└─ {order["item_name"]} · уплачено **{order["paid_price"]} БС**\n'
+        f'└─ заказ: **{order["ordered_at"]} UTC**'
+        for order in visible
+    ]
+    embed = discord.Embed(
+        title="Заявки снабжения",
+        description="\n────────────\n".join(lines) or "Ожидающих заявок нет.",
+        color=0x745B38,
+    )
+    embed.set_footer(text=f"Страница {page + 1}/{pages} · ожидает: {len(orders)}")
+    return embed
+
+
+class SupplyOrderSelect(discord.ui.Select):
+    def __init__(self, owner_view: "SupplyOrdersView", orders: list[dict]):
+        self.owner_view = owner_view
+        super().__init__(
+            placeholder="Выберите заявку",
+            min_values=1,
+            max_values=1,
+            options=[
+                discord.SelectOption(
+                    label=f'#{order["id"]} · {order["item_name"]}'[:100],
+                    value=str(order["id"]),
+                    description=f'{order["surname"]} {order["name"]} · {order["paid_price"]} БС'[:100],
+                )
+                for order in orders
+            ],
+            row=0,
+        )
+
+    async def callback(self, interaction: discord.Interaction):
+        self.owner_view.selected_id = int(self.values[0])
+        await interaction.response.edit_message(view=self.owner_view)
+
+
+class SupplyOrdersView(discord.ui.View):
+    def __init__(self, admin_id: int, guild_id: int, orders: list[dict], page: int = 0):
+        super().__init__(timeout=600)
+        self.admin_id = admin_id
+        self.guild_id = guild_id
+        self.orders = orders
+        self.pages = max(1, (len(orders) + SUPPLY_ORDER_PAGE_SIZE - 1) // SUPPLY_ORDER_PAGE_SIZE)
+        self.page = max(0, min(page, self.pages - 1))
+        self.selected_id: int | None = None
+        visible = orders[self.page * SUPPLY_ORDER_PAGE_SIZE:(self.page + 1) * SUPPLY_ORDER_PAGE_SIZE]
+        if visible:
+            self.add_item(SupplyOrderSelect(self, visible))
+        self.previous.disabled = self.page == 0
+        self.next.disabled = self.page >= self.pages - 1
+        self.approve.disabled = not visible
+        self.reject.disabled = not visible
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if interaction.user.id != self.admin_id or not has_master_access(interaction):
+            await interaction.response.send_message(MASTER_ACCESS_ERROR, ephemeral=True)
+            return False
+        return True
+
+    async def refresh(self, interaction: discord.Interaction, page: int | None = None):
+        orders = await bot.db.pending_purchase_orders(self.guild_id)
+        target_page = self.page if page is None else page
+        view = SupplyOrdersView(self.admin_id, self.guild_id, orders, target_page)
+        await interaction.response.edit_message(
+            embed=build_supply_orders_embed(orders, view.page),
+            view=view,
+        )
+
+    async def resolve(self, interaction: discord.Interaction, approve: bool):
+        if self.selected_id is None:
+            await interaction.response.send_message("Сначала выберите заявку.", ephemeral=True)
+            return
+        success, message, order = await bot.db.resolve_purchase_order(
+            self.guild_id, self.selected_id, interaction.user.id, approve,
+        )
+        if not success:
+            await interaction.response.send_message(message, ephemeral=True)
+            return
+        orders = await bot.db.pending_purchase_orders(self.guild_id)
+        view = SupplyOrdersView(self.admin_id, self.guild_id, orders, self.page)
+        await interaction.response.edit_message(
+            embed=build_supply_orders_embed(orders, view.page),
+            view=view,
+        )
+        await interaction.followup.send(message, ephemeral=True)
+        if order:
+            member = interaction.guild.get_member(int(order["user_id"])) if interaction.guild else None
+            if member:
+                try:
+                    result = "одобрена — предмет добавлен в инвентарь" if approve else f'отклонена — возвращено {order["paid_price"]} БС'
+                    await member.send(f'Ваша заявка на **{order["item_name"]}** {result}.')
+                except discord.HTTPException:
+                    pass
+
+    @discord.ui.button(label="Одобрить", style=discord.ButtonStyle.success, row=1)
+    async def approve(self, interaction: discord.Interaction, _: discord.ui.Button):
+        await self.resolve(interaction, True)
+
+    @discord.ui.button(label="Отклонить", style=discord.ButtonStyle.danger, row=1)
+    async def reject(self, interaction: discord.Interaction, _: discord.ui.Button):
+        await self.resolve(interaction, False)
+
+    @discord.ui.button(label="←", style=discord.ButtonStyle.secondary, row=2)
+    async def previous(self, interaction: discord.Interaction, _: discord.ui.Button):
+        await self.refresh(interaction, self.page - 1)
+
+    @discord.ui.button(label="→", style=discord.ButtonStyle.secondary, row=2)
+    async def next(self, interaction: discord.Interaction, _: discord.ui.Button):
+        await self.refresh(interaction, self.page + 1)
 
 
 TALENT_PAGE_SIZE = 5
@@ -2900,6 +3020,17 @@ async def store_command(interaction: discord.Interaction):
     )
 
 
+@bot.tree.command(name="снабжение", description="Рассмотреть ожидающие заявки на покупку предметов")
+@app_commands.check(require_master_access)
+async def supply_orders_command(interaction: discord.Interaction):
+    orders = await bot.db.pending_purchase_orders(interaction.guild_id)
+    await interaction.response.send_message(
+        embed=build_supply_orders_embed(orders, 0),
+        view=SupplyOrdersView(interaction.user.id, interaction.guild_id, orders),
+        ephemeral=True,
+    )
+
+
 @bot.tree.command(name="купить", description="Купить доступный предмет по названию без листания магазина")
 @app_commands.describe(предмет="Точное название предмета из доступного вам магазина")
 async def buy_item_command(interaction: discord.Interaction, предмет: str):
@@ -2928,8 +3059,8 @@ async def buy_item_command(interaction: discord.Interaction, предмет: str
     paid = store_price(character, item)
     discount = max(0, base_price - paid)
     await interaction.response.send_message(
-        f'{interaction.user.mention} покупает **{item["name"]}** за **{paid} БС**. '
-        f'Скидка: **{discount} БС**.',
+        f'{interaction.user.mention} заказывает **{item["name"]}** за **{paid} БС**. '
+        f'Скидка: **{discount} БС**. Заявка ожидает решения снабжения.',
         ephemeral=False,
     )
 

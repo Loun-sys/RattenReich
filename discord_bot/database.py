@@ -100,6 +100,19 @@ CREATE TABLE IF NOT EXISTS item_price_overrides (
     name TEXT PRIMARY KEY,
     price INTEGER NOT NULL CHECK(price >= 0)
 );
+CREATE TABLE IF NOT EXISTS purchase_orders (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    guild_id INTEGER NOT NULL,
+    character_id INTEGER NOT NULL REFERENCES characters(id) ON DELETE CASCADE,
+    item_id INTEGER NOT NULL,
+    item_name TEXT NOT NULL,
+    paid_price INTEGER NOT NULL,
+    status TEXT NOT NULL DEFAULT 'pending',
+    ordered_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    reviewed_at TEXT,
+    reviewed_by INTEGER
+);
+CREATE INDEX IF NOT EXISTS idx_purchase_orders_guild_status ON purchase_orders(guild_id,status,ordered_at);
 CREATE TABLE IF NOT EXISTS inventory (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     character_id INTEGER NOT NULL REFERENCES characters(id) ON DELETE CASCADE,
@@ -1050,39 +1063,103 @@ class Database:
                     (character_id, slot_talent),
                 )
                 capacity += 1 if talent_rows else 0
-                occupied = int(occupied_rows[0]["occupied"])
+                pending_rows = await db.execute_fetchall(
+                    """SELECT COUNT(*) pending FROM purchase_orders po
+                       JOIN item_catalog ic ON ic.id=po.item_id
+                       WHERE po.character_id=? AND po.status='pending' AND ic.size=?""",
+                    (character_id, item["size"]),
+                )
+                occupied = int(occupied_rows[0]["occupied"]) + int(pending_rows[0]["pending"])
                 if occupied >= capacity:
                     await db.rollback()
                     return False, f"Нет свободного слота: {occupied}/{capacity}.", balance
-            if "расходник" in str(item.get("properties") or "").casefold():
-                stacks = await db.execute_fetchall(
-                    """SELECT id FROM inventory
-                       WHERE character_id=? AND item_id=? AND equipped=0
-                       ORDER BY id LIMIT 1""",
-                    (character_id, item_id),
-                )
-                if stacks:
-                    await db.execute(
-                        "UPDATE inventory SET quantity=quantity+1 WHERE id=?",
-                        (stacks[0]["id"],),
-                    )
-                else:
-                    await db.execute(
-                        "INSERT INTO inventory(character_id,item_id,durability,ammo) VALUES(?,?,?,?)",
-                        (character_id, item_id, item["max_durability"], item["ammo_max"]),
-                    )
-            else:
-                await db.execute(
-                    "INSERT INTO inventory(character_id,item_id,durability,ammo) VALUES(?,?,?,?)",
-                    (character_id, item_id, item["max_durability"], item["ammo_max"]),
-                )
             balance -= price
+            await db.execute(
+                """INSERT INTO purchase_orders(
+                       guild_id,character_id,item_id,item_name,paid_price
+                   ) VALUES((SELECT guild_id FROM characters WHERE id=?),?,?,?,?)""",
+                (character_id, character_id, item_id, item["name"], price),
+            )
             await db.execute(
                 "UPDATE characters SET supply_forms=? WHERE id=?",
                 (balance, character_id),
             )
             await db.commit()
-            return True, f'Приобретено: {item["name"]} за {price} БС.', balance
+            return True, f'Заявка на {item["name"]} создана. Зарезервировано {price} БС.', balance
+
+    async def pending_purchase_orders(self, guild_id: int) -> list[dict[str, Any]]:
+        async with self.connect() as db:
+            rows = await db.execute_fetchall(
+                """SELECT po.*,c.user_id,c.surname,c.name,c.supply_forms
+                   FROM purchase_orders po
+                   JOIN characters c ON c.id=po.character_id
+                   WHERE po.guild_id=? AND po.status='pending'
+                   ORDER BY po.ordered_at,po.id""",
+                (guild_id,),
+            )
+            return [dict(row) for row in rows]
+
+    async def resolve_purchase_order(
+        self, guild_id: int, order_id: int, reviewer_id: int, approve: bool,
+    ) -> tuple[bool, str, dict[str, Any] | None]:
+        async with self.connect() as db:
+            await db.execute("BEGIN IMMEDIATE")
+            rows = await db.execute_fetchall(
+                """SELECT po.*,c.user_id FROM purchase_orders po
+                   JOIN characters c ON c.id=po.character_id
+                   WHERE po.id=? AND po.guild_id=?""",
+                (order_id, guild_id),
+            )
+            if not rows:
+                await db.rollback()
+                return False, "Заявка не найдена.", None
+            order = dict(rows[0])
+            if order["status"] != "pending":
+                await db.rollback()
+                return False, "Эта заявка уже обработана.", order
+            if approve:
+                item_rows = await db.execute_fetchall("SELECT * FROM item_catalog WHERE id=?", (order["item_id"],))
+                if not item_rows:
+                    await db.rollback()
+                    return False, "Предмет больше не существует в каталоге. Отклоните заявку для возврата БС.", order
+                item = dict(item_rows[0])
+                if "расходник" in str(item.get("properties") or "").casefold():
+                    stacks = await db.execute_fetchall(
+                        """SELECT id FROM inventory
+                           WHERE character_id=? AND item_id=? AND equipped=0
+                           ORDER BY id LIMIT 1""",
+                        (order["character_id"], order["item_id"]),
+                    )
+                    if stacks:
+                        await db.execute("UPDATE inventory SET quantity=quantity+1 WHERE id=?", (stacks[0]["id"],))
+                    else:
+                        await db.execute(
+                            "INSERT INTO inventory(character_id,item_id,durability,ammo) VALUES(?,?,?,?)",
+                            (order["character_id"], order["item_id"], item["max_durability"], item["ammo_max"]),
+                        )
+                else:
+                    await db.execute(
+                        "INSERT INTO inventory(character_id,item_id,durability,ammo) VALUES(?,?,?,?)",
+                        (order["character_id"], order["item_id"], item["max_durability"], item["ammo_max"]),
+                    )
+                status = "approved"
+                message = f'Заявка одобрена: {order["item_name"]} выдан игроку.'
+            else:
+                await db.execute(
+                    "UPDATE characters SET supply_forms=supply_forms+? WHERE id=?",
+                    (order["paid_price"], order["character_id"]),
+                )
+                status = "rejected"
+                message = f'Заявка отклонена: возвращено {order["paid_price"]} БС.'
+            await db.execute(
+                """UPDATE purchase_orders
+                   SET status=?,reviewed_at=CURRENT_TIMESTAMP,reviewed_by=?
+                   WHERE id=? AND status='pending'""",
+                (status, reviewer_id, order_id),
+            )
+            await db.commit()
+            order["status"] = status
+            return True, message, order
 
     async def talent_names(self, character_id: int) -> set[str]:
         async with self.connect() as db:
