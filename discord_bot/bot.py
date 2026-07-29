@@ -152,6 +152,26 @@ def profile_embed(character: dict) -> discord.Embed:
     return embed
 
 
+def injuries_embed(character: dict, injuries: list[dict] | None = None) -> discord.Embed:
+    injuries = character.get("injuries", []) if injuries is None else injuries
+    lines = []
+    for injury in injuries:
+        expiry = f' · до {injury["expires_at"]} UTC' if injury.get("expires_at") else ""
+        lines.append(
+            f'**ID {injury["id"]} · №{injury["roll_code"]} {injury["name"]}** '
+            f'({injury["attribute_name"]})\n'
+            f'{injury["description"]}\n'
+            f'Штрафы: {injury["penalties"]} · {injury["duration"]}{expiry}'
+        )
+    embed = discord.Embed(
+        title=f'Травмы · {character["surname"]} {character["name"]}',
+        description=short("\n────────────\n".join(lines) or "Активных травм нет.", 4000),
+        color=0x7A342E,
+    )
+    embed.set_footer(text=f'Активных травм: {len(injuries)}')
+    return embed
+
+
 async def apply_damage(character: dict, attribute: str, amount: int) -> str:
     before, after = await bot.db.damage(character["id"], attribute, amount)
     message = f'**{attribute}:** {before} → {after}'
@@ -265,6 +285,95 @@ def talent_effect(character: dict, key: str, default=None):
     if all(isinstance(value, (int, float)) and not isinstance(value, bool) for value in values):
         return sum(values)
     return values[-1]
+
+
+INJURY_SKILL_STEMS = {
+    "Выносливость": "вынослив",
+    "Сила": "сил",
+    "Драка": "драк",
+    "Скрытность": "скрытност",
+    "Проворство": "проворств",
+    "Стрельба": "стрельб",
+    "Наблюдательность": "наблюдательност",
+    "Анализ": "анализ",
+    "Знания": "знани",
+    "Проницательность": "проницательност",
+    "Влияние": "влияни",
+    "Воодушевление": "воодушевлен",
+    "Снабжение": "снабжен",
+    "Лечение": "лечен",
+    "Обращение": "обращен",
+    "Защита": "защит",
+}
+
+
+def normalized_injury_text(injury: dict) -> str:
+    return " ".join(
+        str(injury.get(key) or "") for key in ("description", "penalties")
+    ).casefold().replace("−", "-").replace("–", "-")
+
+
+def normalized_injury_penalties(injury: dict) -> str:
+    return str(injury.get("penalties") or "").casefold().replace("−", "-").replace("–", "-")
+
+
+def injury_skill_modifier_details(character: dict, skill: str) -> list[tuple[str, int]]:
+    stem = INJURY_SKILL_STEMS.get(skill, skill.casefold())
+    details = []
+    for injury in character.get("injuries", []):
+        text = normalized_injury_penalties(injury)
+        modifier = 0
+        all_match = re.search(r"-(\d+)\s+ко всем навыкам", text)
+        if all_match:
+            modifier -= int(all_match.group(1))
+        for match in re.finditer(r"([+-]\d+)\s+к\s+([^;]+)", text):
+            targets = match.group(2)
+            if "всем навыкам" not in targets and stem in targets:
+                modifier += int(match.group(1))
+        if modifier:
+            details.append((f'Травма «{injury["name"]}»', modifier))
+    return details
+
+
+def injury_blocks_skill(character: dict, skill: str) -> str | None:
+    stem = INJURY_SKILL_STEMS.get(skill, skill.casefold())
+    for injury in character.get("injuries", []):
+        text = normalized_injury_text(injury)
+        if "нельзя совершать проверки навыков" in text:
+            return injury["name"]
+        match = re.search(r"нельзя использовать ([^;]+)", text)
+        if match and "совместно" not in match.group(1) and stem in match.group(1):
+            return injury["name"]
+    return None
+
+
+def injury_blocks_two_handed(character: dict) -> str | None:
+    for injury in character.get("injuries", []):
+        text = normalized_injury_text(injury)
+        if "нельзя" in text and "двуручн" in text:
+            return injury["name"]
+    return None
+
+
+def injury_attribute_damage(character: dict, skill: str) -> int:
+    damage = 0
+    for injury in character.get("injuries", []):
+        text = normalized_injury_text(injury)
+        match = re.search(r"-(\d+)\s+телосложен", text)
+        if not match:
+            continue
+        affects_all = "использован" in text and "любого навыка" in text
+        affects_physical = "за проверку" in text and skill in {"Сила", "Проворство", "Драка"}
+        if affects_all or affects_physical:
+            damage += int(match.group(1))
+    return damage
+
+
+async def apply_injury_roll_damage(character: dict, skill: str) -> str:
+    amount = injury_attribute_damage(character, skill)
+    if amount <= 0:
+        return ""
+    return await apply_damage(character, "Телосложение", amount)
 
 
 def equipment_skill_modifier(items: list[dict], skill: str) -> int:
@@ -438,12 +547,15 @@ def make_pool(
     race_bonus = racial_skill_bonus(character, skill)
     talent_details = talent_skill_bonus_details(character, skill)
     talent_bonus = sum(value for _, value in talent_details)
-    skill_total = permanent_skill + race_bonus + talent_bonus + custom_modifier
+    injury_details = injury_skill_modifier_details(character, skill)
+    injury_modifier = sum(value for _, value in injury_details)
+    skill_total = permanent_skill + race_bonus + talent_bonus + injury_modifier + custom_modifier
     guaranteed = max(0, permanent_skill - 5) if skill in {"\u041b\u0435\u0447\u0435\u043d\u0438\u0435", "\u041e\u0431\u0440\u0430\u0449\u0435\u043d\u0438\u0435", "\u0417\u0430\u0449\u0438\u0442\u0430"} else 0
     modifier_details = []
     if race_bonus:
         modifier_details.append((f'\u0420\u0430\u0441\u0430 \u00ab{character["race"]}\u00bb', race_bonus))
     modifier_details.extend(talent_details)
+    modifier_details.extend(injury_details)
     if custom_modifier:
         modifier_details.append(("\u041f\u0440\u043e\u0447\u0438\u0435 \u043c\u043e\u0434\u0438\u0444\u0438\u043a\u0430\u0442\u043e\u0440\u044b", custom_modifier))
     maximum_rules = talent_effect(character, "max_attribute_for", {}) or {}
@@ -544,6 +656,14 @@ def pool_embed(pool: RollPool, title: str, conditions: str = "") -> discord.Embe
             value="\n".join(colored_dice(values, "gear") for values in pool.gear_dice.values()),
             inline=False,
         )
+    modifier_lines = [
+        f'{name}: **{value:+d}**' for name, value in pool.skill_modifier_details if value
+    ]
+    modifier_lines.extend(
+        f'{name}: **{value:+d} успеха**' for name, value in pool.success_modifier_details if value
+    )
+    if modifier_lines:
+        embed.add_field(name="Модификаторы", value="\n".join(modifier_lines), inline=False)
     modifier = (
         f" · модификатор успехов: **{pool.flat_success_modifier:+d}**"
         if pool.flat_success_modifier else ""
@@ -2096,15 +2216,8 @@ class CharacterPanel(discord.ui.View):
     @discord.ui.button(label="Травмы", style=discord.ButtonStyle.secondary, custom_id="rr:injuries", row=2)
     async def injuries(self, interaction: discord.Interaction, _: discord.ui.Button):
         character = await get_character(interaction)
-        if not character:
-            return
-        injuries = await self.client.db.list_rows("injuries", character["id"])
-        lines = []
-        for injury in injuries:
-            expiry = f' · до {injury["expires_at"]} UTC' if injury.get("expires_at") else ""
-            lines.append(f'`#{injury["id"]}` **№{injury["roll_code"]} {injury["name"]}** ({injury["attribute_name"]})\n{injury["penalties"]} · {injury["duration"]}{expiry}')
-        embed = discord.Embed(title="Активные травмы", description=short("\n\n".join(lines) or "Нет активных травм", 4000), color=0x7A342E)
-        await interaction.response.send_message(embed=embed)
+        if character:
+            await interaction.response.send_message(embed=injuries_embed(character))
 
     @discord.ui.button(label="Заметки", style=discord.ButtonStyle.secondary, custom_id="rr:notes", row=2)
     async def notes(self, interaction: discord.Interaction, _: discord.ui.Button):
@@ -2296,6 +2409,10 @@ class AttackView(discord.ui.View):
                 parts.append(f'Снаряжение: {colored_dice(next(iter(pool.gear_dice.values()), []), "gear")}')
             if pool.negative_dice:
                 parts.append(f'Отрицательные: {colored_dice(pool.negative_dice, "negative")}')
+            if pool.skill_modifier_details:
+                parts.append("Модификаторы кубов: " + ", ".join(
+                    f'{name} **{value:+d}**' for name, value in pool.skill_modifier_details if value
+                ))
             if pool.flat_success_modifier:
                 parts.append(f'Модификатор успехов: **{pool.flat_success_modifier:+d}**')
             parts.append(f'Успехов: **{pool.successes}**')
@@ -3203,6 +3320,12 @@ async def view_talents_command(
 
 
 @bot.tree.command(name="ролл", description="Бросить проверку навыка")
+@app_commands.describe(
+    навык="Проверяемый навык",
+    снаряжение="Необязательный предмет для броска",
+    бонус="Дополнительные положительные кубы (необязательно)",
+    штраф="Дополнительные отрицательные кубы (необязательно)",
+)
 async def skill_roll_command(
     interaction: discord.Interaction,
     навык: str,
@@ -3218,6 +3341,13 @@ async def skill_roll_command(
     skill = normalize(навык, tuple(character["skills"]))
     if not skill or skill not in SKILL_ATTRIBUTES:
         await interaction.response.send_message("Выберите навык персонажа из списка.", ephemeral=True)
+        return
+    blocked_by = injury_blocks_skill(character, skill)
+    if blocked_by:
+        await interaction.response.send_message(
+            f'Травма «{blocked_by}» не позволяет использовать навык **{skill}**.',
+            ephemeral=True,
+        )
         return
     item = None
     gear: dict[int, int] = {}
@@ -3240,9 +3370,22 @@ async def skill_roll_command(
         character, skill, бонус - штраф + auto_modifier, gear,
         success_modifier=success_modifier,
     )
+    pool.skill_modifier_details = [
+        detail for detail in pool.skill_modifier_details if detail[0] != "Прочие модификаторы"
+    ]
+    if auto_modifier:
+        pool.skill_modifier_details.append(("Снаряжение", auto_modifier))
+    if бонус:
+        pool.skill_modifier_details.append(("Опциональный бонус", бонус))
+    if штраф:
+        pool.skill_modifier_details.append(("Опциональный штраф", -штраф))
     conditions = item["conditions"] if item else ""
+    embed = pool_embed(pool, f"Проверка · {skill}", conditions)
+    injury_damage = await apply_injury_roll_damage(character, skill)
+    if injury_damage:
+        embed.add_field(name="Последствие травмы", value=injury_damage, inline=False)
     await interaction.response.send_message(
-        embed=pool_embed(pool, f"Проверка · {skill}", conditions),
+        embed=embed,
         view=SkillRollView(interaction.user.id, character, pool, conditions, can_push=skill != "Стрельба"),
     )
 
@@ -3358,6 +3501,18 @@ async def send_attack(
     if await reject_unfinished_skills(interaction, attacker):
         return
     skill = "Стрельба" if ranged else "Драка"
+    blocked_by = injury_blocks_skill(attacker, skill)
+    if blocked_by:
+        await interaction.response.send_message(
+            f'Травма «{blocked_by}» не позволяет использовать навык **{skill}**.', ephemeral=True,
+        )
+        return
+    two_handed_block = injury_blocks_two_handed(attacker)
+    if weapon and int(weapon.get("hands") or 0) >= 2 and two_handed_block:
+        await interaction.response.send_message(
+            f'Травма «{two_handed_block}» не позволяет использовать двуручное оружие.', ephemeral=True,
+        )
+        return
     if ranged:
         fire_rate = max(1, int(weapon["fire_rate"] or 1))
         if shots > fire_rate:
@@ -3425,15 +3580,20 @@ async def send_attack(
         if npc_current <= 0:
             await interaction.response.send_message("Этот НПС уже выведен из строя.", ephemeral=True)
             return
+        injury_damage = await apply_injury_roll_damage(attacker, skill)
         view = NPCTargetAttackView(
             interaction.user.id, None, attacker, pools, weapon, ranged,
             distance, distance_modifier, target_attribute,
             damage_modifier=damage_bonus - damage_penalty + automatic_damage_bonus,
             target_npc=npc,
         )
-        await interaction.response.send_message(embed=view.attack_embed(), view=view)
+        embed = view.attack_embed()
+        if injury_damage:
+            embed.add_field(name="Последствие травмы атакующего", value=injury_damage, inline=False)
+        await interaction.response.send_message(embed=embed, view=view)
         view.message = await interaction.original_response()
         return
+    injury_damage = await apply_injury_roll_damage(attacker, skill)
     view = AttackView(
         interaction.user.id,
         target.id if target else None,
@@ -3446,9 +3606,12 @@ async def send_attack(
         target_attribute,
         damage_modifier=damage_bonus - damage_penalty + automatic_damage_bonus,
     )
+    embed = view.attack_embed()
+    if injury_damage:
+        embed.add_field(name="Последствие травмы атакующего", value=injury_damage, inline=False)
     await interaction.response.send_message(
         content=f"{target.mention}, по вашему персонажу проводится атака." if target else None,
-        embed=view.attack_embed(),
+        embed=embed,
         view=view,
     )
     view.message = await interaction.original_response()
@@ -4602,23 +4765,64 @@ async def maintenance(interaction: discord.Interaction):
     )
 
 
-@bot.tree.command(name="травма-удалить", description="Удалить свою травму по номеру и категории")
-@app_commands.choices(категория=[
-    app_commands.Choice(name="Физическая травма", value="physical"),
-    app_commands.Choice(name="Психологическая травма", value="psychological"),
-])
+@bot.tree.command(name="травмы", description="Показать активные травмы персонажа")
+@app_commands.describe(участник="Персонаж, чьи травмы нужно посмотреть (по умолчанию — ваш)")
+async def injuries_command(
+    interaction: discord.Interaction,
+    участник: discord.Member | None = None,
+):
+    target = участник or interaction.user
+    character = await bot.db.character(interaction.guild_id, target.id)
+    if not character:
+        await interaction.response.send_message("У выбранного участника нет персонажа.", ephemeral=True)
+        return
+    await interaction.response.send_message(embed=injuries_embed(character))
+
+
+@bot.tree.command(name="удалить-травму", description="Удалить выбранную травму персонажа")
+@app_commands.describe(участник="Персонаж", травма="Активная травма персонажа")
+@app_commands.check(require_master_access)
 async def injury_delete(
     interaction: discord.Interaction,
-    категория: app_commands.Choice[str],
-    номер: app_commands.Range[int, 11, 66],
+    участник: discord.Member,
+    травма: str,
 ):
-    character = await get_character(interaction)
-    if character:
-        deleted = await bot.db.delete_injury_by_code(character["id"], номер, категория.value)
-        await interaction.response.send_message(
-            "Травма снята." if deleted else "Травма с таким номером в выбранной категории не найдена.",
-            ephemeral=True,
+    character = await bot.db.character(interaction.guild_id, участник.id)
+    if not character:
+        await interaction.response.send_message("У выбранного участника нет персонажа.", ephemeral=True)
+        return
+    try:
+        injury_id = int(травма)
+    except ValueError:
+        await interaction.response.send_message("Выберите травму из списка.", ephemeral=True)
+        return
+    deleted = await bot.db.delete_owned_row("injuries", injury_id, character["id"])
+    await interaction.response.send_message(
+        "Травма удалена." if deleted else "Эта активная травма у персонажа не найдена.",
+        ephemeral=True,
+    )
+
+
+@injury_delete.autocomplete("травма")
+async def injury_delete_autocomplete(interaction: discord.Interaction, current: str):
+    member = getattr(interaction.namespace, "участник", None)
+    target_id = member.id if isinstance(member, discord.Member) else interaction.user.id
+    character = await bot.db.character(interaction.guild_id, target_id)
+    if not character:
+        return []
+    query = current.casefold().strip()
+    injuries = [
+        injury for injury in character.get("injuries", [])
+        if query in f'{injury["id"]} {injury["roll_code"]} {injury["name"]}'.casefold()
+    ]
+    return [
+        app_commands.Choice(
+            name=f'ID {injury["id"]} · №{injury["roll_code"]} {injury["name"]}'[:100],
+            value=str(injury["id"]),
         )
+        for injury in injuries[:25]
+    ]
+
 
 
 @item_create.error

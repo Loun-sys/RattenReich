@@ -448,9 +448,17 @@ class Database:
             attrs = await db.execute_fetchall("SELECT * FROM attributes WHERE character_id=?", (result["id"],))
             skills = await db.execute_fetchall("SELECT * FROM skills WHERE character_id=? ORDER BY name", (result["id"],))
             talents = await db.execute_fetchall("SELECT name,description FROM talents WHERE character_id=? ORDER BY name", (result["id"],))
+            injuries = await db.execute_fetchall(
+                """SELECT * FROM injuries
+                   WHERE character_id=? AND active=1
+                   AND (expires_at IS NULL OR expires_at>CURRENT_TIMESTAMP)
+                   ORDER BY id""",
+                (result["id"],),
+            )
             result["attributes"] = {r["name"]: {"current": r["current_value"], "max": r["max_value"]} for r in attrs}
             result["skills"] = {r["name"]: r["value"] for r in skills}
             result["talents"] = {r["name"]: r["description"] for r in talents}
+            result["injuries"] = [dict(r) for r in injuries]
             return result
 
     async def delete_character(self, guild_id: int, user_id: int) -> str | None:
