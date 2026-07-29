@@ -34,18 +34,65 @@ ACCESS_FLOORS = {
 }
 
 
-def _weapon_access(damage: int, gear: int) -> str:
-    damage, gear = max(0, damage), max(0, gear)
-    if damage <= 1 and gear <= 1:
-        return "Общедоступное"
-    if max(damage, gear) <= 2 and min(damage, gear) <= 1:
-        return "Снабжение II"
-    if damage == 2 and gear == 2:
-        return "Снабжение III"
-    if max(damage, gear) == 3 and min(damage, gear) <= 1:
-        return "Снабжение IV"
-    return "Снабжение V"
+def _effect_rating(item: dict[str, Any]) -> int:
+    text = f'{item.get("properties") or ""} {item.get("conditions") or ""}'.casefold()
+    bonus = 0
+    if any(marker in text for marker in ("игнорирует 1", "игнорирует 2", "+2 к", "добавляет 3 куб", "+3 куб")):
+        bonus += 1
+    if any(marker in text for marker in ("дополнительный урон", "+1 урон", "каждый незаблокированный успех")):
+        bonus += 1
+    if "нельзя сломать" in text or "неразрушим" in text:
+        bonus += 1
+    if any(marker in text for marker in ("требуется действие", "требует действия", "требует двух", "требует упора", "после каждого выстрела")):
+        bonus -= 1
+    if any(marker in text for marker in ("считается сломанным", "проверка 50% на поломку", "может взорваться")):
+        bonus -= 1
+    return max(-1, min(1, bonus))
 
+
+def _weapon_access(item: dict[str, Any]) -> str:
+    damage = max(0, int(item.get("damage") or 0))
+    gear = max(0, int(item.get("gear") or 0))
+    hands = max(0, int(item.get("hands") or 0))
+    effect = _effect_rating(item)
+    if str(item.get("category") or "") == "Оружие дальнего боя":
+        fire_rate = max(1, int(item.get("fire_rate") or 1))
+        ammo = max(0, int(item.get("ammo_max") or 0))
+        use_range = str(item.get("use_range") or "")
+        fire_score = 0 if fire_rate == 1 else 1 if fire_rate == 2 else 2 if fire_rate == 3 else 3 if fire_rate <= 5 else 4
+        ammo_score = -1 if ammo <= 1 else 0 if ammo <= 3 else 1 if ammo <= 5 else 2 if ammo <= 11 else 3
+        range_score = {"Нулевая": -1, "Ближняя": 0, "Средняя": 1, "Дальняя": 2}.get(use_range, 0)
+        score = damage * 2 + gear + fire_score + ammo_score + range_score - (1 if hands >= 2 else 0) + effect
+        exceptional = (
+            damage >= 3 and gear >= 3 and fire_rate >= 3
+        ) or (
+            damage >= 2 and gear >= 3 and fire_rate >= 4 and ammo >= 4
+        )
+        if exceptional and score >= 12:
+            return "Снабжение V"
+        if score >= 11 or damage >= 4:
+            return "Снабжение IV"
+        if score >= 9:
+            return "Снабжение III"
+        if damage >= 3:
+            return "Снабжение II"
+        if score >= 7:
+            return "Снабжение II"
+        if score >= 5 or damage >= 2 or gear >= 3:
+            return "Снабжение I"
+        return "Общедоступное"
+    score = damage * 2 + gear + (1 if item.get("use_range") == "Ближняя" else 0) - (1 if hands >= 2 else 0) + effect
+    if damage >= 3 and gear >= 3 and score >= 8:
+        return "Снабжение V"
+    if score >= 8 or (damage >= 3 and gear >= 2):
+        return "Снабжение IV"
+    if score >= 6:
+        return "Снабжение III"
+    if score >= 5:
+        return "Снабжение II"
+    if score >= 4:
+        return "Снабжение I"
+    return "Общедоступное"
 
 def _weapon_price(item: dict[str, Any]) -> int:
     base = REDUCED_BASE_PRICES[str(item["access"])]
@@ -62,7 +109,17 @@ def _weapon_price(item: dict[str, Any]) -> int:
         ammo = int(item.get("ammo_max") or 0)
         adjustment += 1 if fire_rate >= 4 else 0
         adjustment += 1 if ammo >= 6 else (-1 if ammo == 1 else 0)
-    return max(3, base + max(-3, min(3, adjustment)))
+    raw_price = base + max(-3, min(3, adjustment))
+    bounds = {
+        "Общедоступное": (3, 4),
+        "Снабжение I": (5, 6),
+        "Снабжение II": (7, 9),
+        "Снабжение III": (10, 13),
+        "Снабжение IV": (14, 20),
+        "Снабжение V": (22, 30),
+    }
+    minimum, maximum = bounds[str(item["access"])]
+    return max(minimum, min(maximum, raw_price))
 
 
 def _protection_price(item: dict[str, Any]) -> int:
@@ -78,7 +135,7 @@ def _protection_price(item: dict[str, Any]) -> int:
 def _balance_item(item: dict[str, Any]) -> dict[str, Any]:
     category = str(item.get("category") or "")
     if category.startswith("Оружие "):
-        item["access"] = _weapon_access(int(item.get("damage") or 0), int(item.get("gear") or 0))
+        item["access"] = _weapon_access(item)
     elif category == "Броня":
         protection = max(0, int(item.get("defense") or 0))
         if str(item.get("armor_slot") or item.get("size") or "") == "Большой":
