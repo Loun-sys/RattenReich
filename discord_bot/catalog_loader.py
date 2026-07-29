@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import re
 from pathlib import Path
 from typing import Any
@@ -11,6 +12,50 @@ def _integer(value: str, default: int = 0) -> int:
 
 
 REMOVED_SOURCE_NUMBERS = {55, 56, 58, 60}
+
+SUPPLY_LEVELS = ("I", "II", "III", "IV", "V")
+
+ACCESS_FLOORS = {
+    "Общедоступное": 5,
+    "Снабжение I": 7,
+    "Снабжение II": 10,
+    "Снабжение III": 15,
+    "Снабжение IV": 20,
+    "Снабжение V": 30,
+}
+
+
+def _weapon_access(damage: int, gear: int) -> str:
+    damage, gear = max(0, damage), max(0, gear)
+    if damage <= 1 and gear <= 1:
+        return "Общедоступное"
+    if max(damage, gear) <= 2 and min(damage, gear) <= 1:
+        return "Снабжение II"
+    if damage == 2 and gear == 2:
+        return "Снабжение III"
+    if max(damage, gear) == 3 and min(damage, gear) <= 1:
+        return "Снабжение IV"
+    return "Снабжение V"
+
+
+def _balance_item(item: dict[str, Any]) -> dict[str, Any]:
+    category = str(item.get("category") or "")
+    if category.startswith("Оружие "):
+        item["access"] = _weapon_access(int(item.get("damage") or 0), int(item.get("gear") or 0))
+    elif category == "Броня":
+        protection = max(0, int(item.get("defense") or 0))
+        if str(item.get("armor_slot") or item.get("size") or "") == "Большой":
+            tier = min(5, max(2, protection + 1))
+        else:
+            tier = min(5, max(0, protection - 1))
+        item["access"] = "Общедоступное" if tier == 0 else f"Снабжение {SUPPLY_LEVELS[tier - 1]}"
+    elif category == "Щит":
+        protection = max(0, int(item.get("defense") or item.get("gear") or 0))
+        tier = min(5, max(0, protection - 1))
+        item["access"] = "Общедоступное" if tier == 0 else f"Снабжение {SUPPLY_LEVELS[tier - 1]}"
+    if category.startswith("Оружие ") or category in {"Броня", "Щит"}:
+        item["price"] = max(int(item.get("price") or 0), ACCESS_FLOORS[item["access"]])
+    return item
 
 
 def _apply_summary_overrides(items: list[dict[str, Any]], source_path: Path) -> list[dict[str, Any]]:
@@ -181,4 +226,9 @@ def load_catalog(path: Path) -> list[dict[str, Any]]:
                 "description": expanded_effect or conditions,
                 "armor_slot": size if category == "Броня" else None,
             })
-    return _apply_summary_overrides(result, path)
+    result = _apply_summary_overrides(result, path)
+    approved_path = path.parent / "APPROVED_ITEMS.json"
+    if approved_path.exists():
+        approved = json.loads(approved_path.read_text(encoding="utf-8"))
+        result.extend(approved.get("items", []))
+    return [_balance_item(item) for item in result]

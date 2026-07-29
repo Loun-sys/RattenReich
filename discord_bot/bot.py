@@ -2903,34 +2903,42 @@ class NPCTargetAttackView(AttackView):
         if current <= 0:
             await interaction.response.send_message("Этот НПС уже выведен из строя.", ephemeral=True)
             return
-        defense_dice = d6(int(npc["defense"]))
-        defense_successes = sum(value == 6 for value in defense_dice)
+        armor_dice = d6(int(npc["defense"]))
+        shield_dice = d6(int(npc["shield"]))
+        indestructible_dice = d6(int(npc["indestructible_defense"]))
+        defense_successes = sum(value == 6 for value in armor_dice + shield_dice + indestructible_dice)
         net = max(0, self.attack_successes - defense_successes)
         damage_factor = max(1, int(self.weapon["damage"])) if self.weapon else 1
-        damage = max(0, net * damage_factor + self.damage_modifier)
-        before, after = await bot.db.damage_npc_attribute(
-            npc["id"], self.target_attribute, damage
-        )
-        defense_change = None
+        raw_damage = max(0, net * damage_factor + self.damage_modifier)
+        damage_type = str(self.weapon.get("damage_type") or "") if self.weapon else ""
+        reductions = json.loads(npc.get("damage_reductions") or "{}")
+        reduction = max(0, int(reductions.get(damage_type, 0)))
+        damage = max(0, raw_damage - reduction)
+        before, after = await bot.db.damage_npc_attribute(npc["id"], self.target_attribute, damage)
+        armor_change = shield_change = None
         if damage > 0:
-            defense_change = await bot.db.adjust_npc_defense(npc["id"], -1)
+            if int(npc["defense"]) > 0:
+                armor_change = await bot.db.adjust_npc_protection(npc["id"], "Броня", -1)
+            if int(npc["shield"]) > 0:
+                shield_change = await bot.db.adjust_npc_protection(npc["id"], "Щит", -1)
         embed = self.attack_embed()
-        embed.add_field(
-            name=f'Автоматическая защита · {npc["name"]}',
-            value=(
-                f'Кубы: {colored_dice(defense_dice, "gear")}\n'
-                f'Успехов защиты: **{defense_successes}**\n'
-                f'Незаблокированных успехов: **{net}**\n'
-                + (f'Модификатор урона: **{self.damage_modifier:+d}**\n' if self.damage_modifier else "")
-                + f'Урон: **{damage}**\n'
-                f'{self.target_attribute}: **{before}/{maximum} → {after}/{maximum}**'
-                + (
-                    f'\nЗащита пробита: **{defense_change[0]} → {defense_change[1]}**'
-                    if defense_change else ""
-                )
-            ),
-            inline=False,
-        )
+        lines = [
+            f'Броня: {colored_dice(armor_dice, "gear")}',
+            f'Щит: {colored_dice(shield_dice, "gear")}',
+            f'Неразрушимая защита: {colored_dice(indestructible_dice, "gear")}',
+            f'Успехов защиты: **{defense_successes}**',
+            f'Незаблокированных успехов: **{net}**',
+        ]
+        if self.damage_modifier:
+            lines.append(f'Модификатор урона: **{self.damage_modifier:+d}**')
+        if reduction:
+            lines.append(f'Снижение {damage_type}: **−{min(raw_damage, reduction)}**')
+        lines.extend((f'Урон: **{damage}**', f'{self.target_attribute}: **{before}/{maximum} → {after}/{maximum}**'))
+        if armor_change:
+            lines.append(f'Броня повреждена: **{armor_change[0]} → {armor_change[1]}**')
+        if shield_change:
+            lines.append(f'Щит повреждён: **{shield_change[0]} → {shield_change[1]}**')
+        embed.add_field(name=f'Автоматическая защита · {npc["name"]}', value="\n".join(lines), inline=False)
         await interaction.response.edit_message(embed=embed, view=None)
 
 
@@ -3540,6 +3548,7 @@ async def consumable_autocomplete(interaction: discord.Interaction, current: str
 @app_commands.choices(
     тип_ближний=[app_commands.Choice(name=name, value=name) for name in ("Дробящий", "Колющий", "Режущий", "Огненный")],
     тип_дальний=[app_commands.Choice(name=name, value=name) for name in ("Дробящий", "Колющий", "Режущий", "Огненный")],
+    тип_снижения=[app_commands.Choice(name=name, value=name) for name in ("Дробящий", "Колющий", "Режущий", "Огненный", "Взрывной", "Кислотный")],
 )
 @app_commands.check(require_master_access)
 async def npc_create_command(
@@ -3555,16 +3564,23 @@ async def npc_create_command(
     тип_ближний: app_commands.Choice[str],
     тип_дальний: app_commands.Choice[str],
     описание: str = "",
+    щит: app_commands.Range[int, 0, 50] = 0,
+    неразрушимая_защита: app_commands.Range[int, 0, 50] = 0,
+    тип_снижения: app_commands.Choice[str] | None = None,
+    снижение_урона: app_commands.Range[int, 0, 50] = 0,
 ):
     await bot.db.create_npc(
         interaction.guild_id, имя.strip(), телосложение, ловкость, защита,
         драка, стрельба, урон_ближний, урон_дальний,
-        тип_ближний.value, тип_дальний.value, описание,
+        тип_ближний.value, тип_дальний.value, описание, щит, неразрушимая_защита,
+        json.dumps({тип_снижения.value: снижение_урона}, ensure_ascii=False)
+        if тип_снижения and снижение_урона else "{}",
     )
     await interaction.response.send_message(
         f'НПС **{имя.strip()}** сохранён: Телосложение {телосложение}, '
         f'Ловкость {ловкость}, защита {защита}, Драка {драка} ({тип_ближний.value}), '
-        f'Стрельба {стрельба} ({тип_дальний.value}).',
+        f'Стрельба {стрельба} ({тип_дальний.value}), щит {щит}, '
+        f'неразрушимая защита {неразрушимая_защита}.',
         ephemeral=True,
     )
 
@@ -3676,26 +3692,62 @@ async def npc_ranged_autocomplete(interaction: discord.Interaction, current: str
     return await npc_choices(interaction, current)
 
 
-@bot.tree.command(name="понизить-защиту", description="Понизить текущую защиту НПС")
+@bot.tree.command(name="защита-нпс", description="Повредить или починить броню, щит либо неразрушимую защиту НПС")
+@app_commands.choices(
+    вид=[app_commands.Choice(name=name, value=name) for name in ("Броня", "Щит", "Неразрушимая защита")],
+    действие=[
+        app_commands.Choice(name="Починить", value="плюс"),
+        app_commands.Choice(name="Повредить", value="минус"),
+    ],
+)
 @app_commands.check(require_master_access)
-async def lower_npc_defense_command(
+async def npc_protection_command(
     interaction: discord.Interaction,
     нпс: str,
+    вид: app_commands.Choice[str],
+    действие: app_commands.Choice[str],
     количество: app_commands.Range[int, 1, 50],
 ):
     npc = await bot.db.npc(interaction.guild_id, нпс)
     if not npc:
         await interaction.response.send_message("НПС не найден.", ephemeral=True)
         return
-    before, after = await bot.db.adjust_npc_defense(npc["id"], -количество)
+    delta = количество if действие.value == "плюс" else -количество
+    result = await bot.db.adjust_npc_protection(npc["id"], вид.value, delta)
+    before, after = result
     await interaction.response.send_message(
-        f'НПС **{npc["name"]}**: защита **{before}/{npc["defense_max"]} → '
-        f'{after}/{npc["defense_max"]}**.'
+        f'НПС **{npc["name"]}** · {вид.value}: **{before} → {after}**.'
     )
 
 
-@lower_npc_defense_command.autocomplete("нпс")
-async def lower_npc_defense_autocomplete(interaction: discord.Interaction, current: str):
+@npc_protection_command.autocomplete("нпс")
+async def npc_protection_autocomplete(interaction: discord.Interaction, current: str):
+    return await npc_choices(interaction, current)
+
+
+@bot.tree.command(name="снижение-урона-нпс", description="Задать НПС постоянное снижение выбранного типа урона")
+@app_commands.choices(
+    тип=[app_commands.Choice(name=name, value=name) for name in ("Дробящий", "Колющий", "Режущий", "Огненный", "Взрывной", "Кислотный")]
+)
+@app_commands.check(require_master_access)
+async def npc_reduction_command(
+    interaction: discord.Interaction,
+    нпс: str,
+    тип: app_commands.Choice[str],
+    количество: app_commands.Range[int, 0, 50],
+):
+    npc = await bot.db.npc(interaction.guild_id, нпс)
+    if not npc:
+        await interaction.response.send_message("НПС не найден.", ephemeral=True)
+        return
+    await bot.db.set_npc_damage_reduction(npc["id"], тип.value, количество)
+    await interaction.response.send_message(
+        f'НПС **{npc["name"]}**: снижение типа **{тип.value}** = **{количество}**.'
+    )
+
+
+@npc_reduction_command.autocomplete("нпс")
+async def npc_reduction_autocomplete(interaction: discord.Interaction, current: str):
     return await npc_choices(interaction, current)
 
 
@@ -3706,7 +3758,9 @@ async def npc_list_command(interaction: discord.Interaction):
     lines = [
         f'**{npc["name"]}** · Телосложение {npc["physique"]}/{npc["physique_max"]} · '
         f'Ловкость {npc["agility"]}/{npc["agility_max"]} · '
-        f'защита {npc["defense"]}/{npc["defense_max"]}\n'
+        f'броня {npc["defense"]}/{npc["defense_max"]} · '
+        f'щит {npc["shield"]}/{npc["shield_max"]} · '
+        f'неразрушимая {npc["indestructible_defense"]}/{npc["indestructible_defense_max"]}\n'
         f'Драка {npc["fight_skill"]} · урон {npc["melee_damage"]} · '
         f'Стрельба {npc["shooting_skill"]} · урон {npc["ranged_damage"]}'
         + (f'\n{npc["description"]}' if npc["description"] else "")

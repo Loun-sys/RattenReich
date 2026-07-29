@@ -137,6 +137,11 @@ CREATE TABLE IF NOT EXISTS npcs (
     agility INTEGER NOT NULL DEFAULT 1,
     agility_max INTEGER NOT NULL DEFAULT 1,
     defense_max INTEGER NOT NULL DEFAULT 0,
+    shield INTEGER NOT NULL DEFAULT 0,
+    shield_max INTEGER NOT NULL DEFAULT 0,
+    indestructible_defense INTEGER NOT NULL DEFAULT 0,
+    indestructible_defense_max INTEGER NOT NULL DEFAULT 0,
+    damage_reductions TEXT NOT NULL DEFAULT '{}',
     fight_skill INTEGER NOT NULL DEFAULT 0,
     shooting_skill INTEGER NOT NULL DEFAULT 0,
     melee_damage INTEGER NOT NULL DEFAULT 1,
@@ -208,6 +213,11 @@ class Database:
                 "agility": "INTEGER NOT NULL DEFAULT 1",
                 "agility_max": "INTEGER NOT NULL DEFAULT 1",
                 "defense_max": "INTEGER NOT NULL DEFAULT 0",
+                "shield": "INTEGER NOT NULL DEFAULT 0",
+                "shield_max": "INTEGER NOT NULL DEFAULT 0",
+                "indestructible_defense": "INTEGER NOT NULL DEFAULT 0",
+                "indestructible_defense_max": "INTEGER NOT NULL DEFAULT 0",
+                "damage_reductions": "TEXT NOT NULL DEFAULT '{}'",
                 "fight_skill": "INTEGER NOT NULL DEFAULT 0",
                 "shooting_skill": "INTEGER NOT NULL DEFAULT 0",
                 "melee_damage": "INTEGER NOT NULL DEFAULT 1",
@@ -599,21 +609,28 @@ class Database:
         melee_damage_type: str,
         ranged_damage_type: str,
         description: str,
+        shield: int = 0,
+        indestructible_defense: int = 0,
+        damage_reductions: str = '{}',
     ) -> int:
         async with self.connect() as db:
             await db.execute(
                 """INSERT INTO npcs(
                      guild_id,name,health,max_health,defense,attack_dice,damage,description,
                      physique,physique_max,agility,agility_max,defense_max,
+                     shield,shield_max,indestructible_defense,indestructible_defense_max,damage_reductions,
                      fight_skill,shooting_skill,melee_damage,ranged_damage,
                      melee_damage_type,ranged_damage_type
-                   ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                   ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
                    ON CONFLICT(guild_id,name) DO UPDATE SET
                      health=excluded.health,max_health=excluded.max_health,
                      defense=excluded.defense,description=excluded.description,
                      physique=excluded.physique,physique_max=excluded.physique_max,
                      agility=excluded.agility,agility_max=excluded.agility_max,
-                     defense_max=excluded.defense_max,fight_skill=excluded.fight_skill,
+                     defense_max=excluded.defense_max,shield=excluded.shield,shield_max=excluded.shield_max,
+                     indestructible_defense=excluded.indestructible_defense,
+                     indestructible_defense_max=excluded.indestructible_defense_max,
+                     damage_reductions=excluded.damage_reductions,fight_skill=excluded.fight_skill,
                      shooting_skill=excluded.shooting_skill,melee_damage=excluded.melee_damage,
                      ranged_damage=excluded.ranged_damage,
                      melee_damage_type=excluded.melee_damage_type,
@@ -621,6 +638,7 @@ class Database:
                 (
                     guild_id, name, physique, physique, defense, fight_skill, melee_damage, description,
                     physique, physique, agility, agility, defense,
+                    shield, shield, indestructible_defense, indestructible_defense, damage_reductions,
                     fight_skill, shooting_skill, melee_damage, ranged_damage,
                     melee_damage_type, ranged_damage_type,
                     ),
@@ -712,19 +730,53 @@ class Database:
             await db.commit()
             return before, after
 
-    async def adjust_npc_defense(self, npc_id: int, delta: int) -> tuple[int, int] | None:
+    async def adjust_npc_protection(
+        self, npc_id: int, protection: str, delta: int
+    ) -> tuple[int, int] | None:
+        columns = {
+            "Броня": ("defense", "defense_max"),
+            "Щит": ("shield", "shield_max"),
+            "Неразрушимая защита": ("indestructible_defense", "indestructible_defense_max"),
+        }
+        selected = columns.get(protection)
+        if not selected:
+            return None
+        current_column, maximum_column = selected
         async with self.connect() as db:
             rows = await db.execute_fetchall(
-                "SELECT defense,defense_max FROM npcs WHERE id=?",
+                f"SELECT {current_column} current_value,{maximum_column} max_value FROM npcs WHERE id=?",
                 (npc_id,),
             )
             if not rows:
                 return None
-            before = int(rows[0]["defense"])
-            after = max(0, min(int(rows[0]["defense_max"]), before + delta))
-            await db.execute("UPDATE npcs SET defense=? WHERE id=?", (after, npc_id))
+            before = int(rows[0]["current_value"])
+            after = max(0, min(int(rows[0]["max_value"]), before + delta))
+            await db.execute(f"UPDATE npcs SET {current_column}=? WHERE id=?", (after, npc_id))
             await db.commit()
             return before, after
+
+    async def adjust_npc_defense(self, npc_id: int, delta: int) -> tuple[int, int] | None:
+        return await self.adjust_npc_protection(npc_id, "Броня", delta)
+
+    async def set_npc_damage_reduction(
+        self, npc_id: int, damage_type: str, amount: int
+    ) -> bool:
+        import json
+        async with self.connect() as db:
+            rows = await db.execute_fetchall("SELECT damage_reductions FROM npcs WHERE id=?", (npc_id,))
+            if not rows:
+                return False
+            reductions = json.loads(rows[0]["damage_reductions"] or "{}")
+            if amount > 0:
+                reductions[damage_type] = amount
+            else:
+                reductions.pop(damage_type, None)
+            await db.execute(
+                "UPDATE npcs SET damage_reductions=? WHERE id=?",
+                (json.dumps(reductions, ensure_ascii=False), npc_id),
+            )
+            await db.commit()
+            return True
 
     async def delete_npc(self, guild_id: int, name: str) -> bool:
         async with self.connect() as db:
