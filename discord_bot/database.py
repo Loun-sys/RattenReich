@@ -9,6 +9,7 @@ from typing import Any
 import aiosqlite
 
 from catalog_loader import load_catalog
+from attachment_data import ATTACHMENT_BY_NAME, apply_attachments, compatible
 from constants import ATTRIBUTES, CLASSES, SKILLS
 from talent_data import TALENTS
 
@@ -110,6 +111,12 @@ CREATE TABLE IF NOT EXISTS inventory (
     notes TEXT NOT NULL DEFAULT ''
 );
 CREATE INDEX IF NOT EXISTS idx_inventory_character ON inventory(character_id);
+CREATE TABLE IF NOT EXISTS weapon_attachments (
+    weapon_inventory_id INTEGER NOT NULL REFERENCES inventory(id) ON DELETE CASCADE,
+    attachment_inventory_id INTEGER NOT NULL UNIQUE REFERENCES inventory(id) ON DELETE CASCADE,
+    slot TEXT NOT NULL,
+    PRIMARY KEY(weapon_inventory_id,slot)
+);
 CREATE INDEX IF NOT EXISTS idx_injuries_character ON injuries(character_id, active);
 CREATE TABLE IF NOT EXISTS character_effects (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -1296,7 +1303,63 @@ class Database:
                    WHERE character_id=? ORDER BY inventory.equipped DESC,item_catalog.size,item_catalog.name""",
                 (character_id,),
             )
-            return [dict(row) for row in rows]
+            items = [dict(row) for row in rows]
+            links = await db.execute_fetchall(
+                """SELECT wa.weapon_inventory_id,ic.name FROM weapon_attachments wa
+                   JOIN inventory ai ON ai.id=wa.attachment_inventory_id
+                   JOIN item_catalog ic ON ic.id=ai.item_id
+                   JOIN inventory wi ON wi.id=wa.weapon_inventory_id
+                   WHERE wi.character_id=?""", (character_id,)
+            )
+            attached = {}
+            for link in links:
+                attached.setdefault(int(link["weapon_inventory_id"]), []).append(ATTACHMENT_BY_NAME[link["name"]])
+            return [apply_attachments(item, attached.get(int(item["id"]), [])) for item in items]
+
+    async def weapon_attachments(self, character_id: int, weapon_id: int | None = None) -> list[dict[str, Any]]:
+        async with self.connect() as db:
+            query = """SELECT wa.slot,wa.weapon_inventory_id,wa.attachment_inventory_id,ic.name
+                       FROM weapon_attachments wa JOIN inventory ai ON ai.id=wa.attachment_inventory_id
+                       JOIN item_catalog ic ON ic.id=ai.item_id JOIN inventory wi ON wi.id=wa.weapon_inventory_id
+                       WHERE wi.character_id=?"""
+            params = [character_id]
+            if weapon_id is not None:
+                query += " AND wa.weapon_inventory_id=?"
+                params.append(weapon_id)
+            return [dict(row) for row in await db.execute_fetchall(query, params)]
+
+    async def install_attachment(self, character_id: int, weapon_id: int, attachment_id: int) -> tuple[bool, str]:
+        async with self.connect() as db:
+            rows = await db.execute_fetchall(
+                """SELECT i.id,ic.name,ic.category,ic.conditions,ic.fire_rate FROM inventory i
+                   JOIN item_catalog ic ON ic.id=i.item_id WHERE i.character_id=? AND i.id IN (?,?)""",
+                (character_id, weapon_id, attachment_id),
+            )
+            weapon = next((dict(r) for r in rows if r["id"] == weapon_id and r["category"] == "Оружие дальнего боя"), None)
+            attachment = next((dict(r) for r in rows if r["id"] == attachment_id and r["category"] == "Насадка"), None)
+            if not weapon or not attachment:
+                return False, "Выберите своё огнестрельное оружие и насадку."
+            spec = ATTACHMENT_BY_NAME.get(attachment["name"])
+            if not spec or not compatible(spec, weapon):
+                return False, "Эта насадка несовместима с выбранным оружием."
+            if await db.execute_fetchall("SELECT 1 FROM weapon_attachments WHERE weapon_inventory_id=? AND slot=?", (weapon_id, spec["slot"])):
+                return False, f'Слот «{spec["slot"]}» уже занят.'
+            try:
+                await db.execute("INSERT INTO weapon_attachments VALUES(?,?,?)", (weapon_id, attachment_id, spec["slot"]))
+            except Exception:
+                return False, "Эта насадка уже установлена на другое оружие."
+            await db.commit()
+            return True, f'{attachment["name"]} установлена на {weapon["name"]}.'
+
+    async def remove_attachment(self, character_id: int, weapon_id: int, attachment_id: int) -> tuple[bool, str]:
+        async with self.connect() as db:
+            cursor = await db.execute(
+                """DELETE FROM weapon_attachments WHERE weapon_inventory_id=? AND attachment_inventory_id=?
+                   AND EXISTS(SELECT 1 FROM inventory WHERE id=? AND character_id=?)""",
+                (weapon_id, attachment_id, weapon_id, character_id),
+            )
+            await db.commit()
+            return cursor.rowcount > 0, ("Насадка снята." if cursor.rowcount else "Такая насадка не установлена.")
 
     async def inventory_item_by_name(self, character_id: int, name: str, equipped_only: bool = False) -> dict[str, Any] | None:
         items = await self.inventory(character_id)
@@ -1463,6 +1526,12 @@ class Database:
                 return None
             current = int(weapon_rows[0]["ammo"] or 0)
             maximum = int(weapon_rows[0]["ammo_max"])
+            attachment_rows = await db.execute_fetchall(
+                """SELECT ic.name FROM weapon_attachments wa
+                   JOIN inventory ai ON ai.id=wa.attachment_inventory_id
+                   JOIN item_catalog ic ON ic.id=ai.item_id WHERE wa.weapon_inventory_id=?""", (row_id,)
+            )
+            maximum += sum(int(ATTACHMENT_BY_NAME[row["name"]].get("ammo") or 0) for row in attachment_rows)
             if current >= maximum:
                 await db.rollback()
                 return current, maximum

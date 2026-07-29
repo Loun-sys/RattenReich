@@ -5,6 +5,8 @@ import re
 from pathlib import Path
 from typing import Any
 
+from attachment_data import ATTACHMENTS
+
 
 def _integer(value: str, default: int = 0) -> int:
     match = re.search(r"\d+", value or "")
@@ -327,4 +329,13 @@ def load_catalog(path: Path) -> list[dict[str, Any]]:
     if approved_path.exists():
         approved = json.loads(approved_path.read_text(encoding="utf-8"))
         result.extend(approved.get("items", []))
+    for index, attachment in enumerate(ATTACHMENTS, 600):
+        result.append({
+            "source_number": index, "name": attachment["name"], "size": "Безделушка",
+            "category": "Насадка", "max_durability": 1, "gear": 0, "hands": 0,
+            "damage": 0, "damage_type": "", "defense": 0, "use_range": None,
+            "ammo_max": None, "fire_rate": None, "price": attachment["price"],
+            "access": attachment["access"], "properties": f'Слот: {attachment["slot"]}; Совместимость: {attachment["kinds"]}',
+            "conditions": attachment["effect"], "description": attachment["effect"], "armor_slot": None,
+        })
     return [_balance_item(item) for item in result]

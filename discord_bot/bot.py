@@ -1050,6 +1050,8 @@ async def build_inventory_embed(
             details.append(f'боезапас {item["ammo"]}/{item["ammo_max"]}')
         if item["fire_rate"]:
             details.append(f'СКР {item["fire_rate"]}')
+        if item.get("attachments"):
+            details.append("насадки: " + ", ".join(item["attachments"]))
         if item["equipped"]:
             details.append("экипировано")
         quantity = f' ×{item["quantity"]}' if int(item["quantity"]) > 1 else ""
@@ -2338,6 +2340,79 @@ async def inventory_command(interaction: discord.Interaction, участник: 
     )
 
 
+@bot.tree.command(name="модификация-оружия", description="Установить, снять или посмотреть насадки выбранного оружия")
+@app_commands.choices(действие=[
+    app_commands.Choice(name="Установить", value="установить"),
+    app_commands.Choice(name="Снять", value="снять"),
+    app_commands.Choice(name="Показать", value="показать"),
+])
+async def weapon_modification_command(
+    interaction: discord.Interaction,
+    действие: app_commands.Choice[str],
+    оружие: str,
+    насадка: str | None = None,
+):
+    character = await bot.db.character(interaction.guild_id, interaction.user.id)
+    if not character:
+        await interaction.response.send_message("Сначала зарегистрируйте персонажа.", ephemeral=True)
+        return
+    try:
+        weapon_id = int(оружие)
+        attachment_id = int(насадка) if насадка else None
+    except ValueError:
+        await interaction.response.send_message("Выберите оружие и насадку из подсказок команды.", ephemeral=True)
+        return
+    weapon = next((item for item in await bot.db.inventory(character["id"]) if int(item["id"]) == weapon_id), None)
+    if not weapon or weapon["category"] != "Оружие дальнего боя":
+        await interaction.response.send_message("Оружие не найдено.", ephemeral=True)
+        return
+    if действие.value == "показать":
+        installed = await bot.db.weapon_attachments(character["id"], weapon_id)
+        lines = [f'**{row["slot"]}:** {row["name"]}' for row in installed] or ["Насадки не установлены."]
+        stats = (
+            f'Урон **{weapon["damage"]}** · качество **{weapon["durability"]}'
+            f'{int(weapon.get("attachment_gear_modifier") or 0):+d} · СКР **{weapon["fire_rate"]}** · '
+            f'БК **{weapon["ammo"]}/{weapon["ammo_max"]}** · дистанция **{weapon["use_range"]}**'
+        )
+        await interaction.response.send_message(
+            embed=discord.Embed(title=f'Модификация · {weapon["name"]} #{weapon_id}', description="\n".join(lines) + "\n\n" + stats, color=0x6E654F),
+            ephemeral=True,
+        )
+        return
+    if attachment_id is None:
+        await interaction.response.send_message("Для этого действия выберите насадку.", ephemeral=True)
+        return
+    if действие.value == "установить":
+        success, message = await bot.db.install_attachment(character["id"], weapon_id, attachment_id)
+    else:
+        success, message = await bot.db.remove_attachment(character["id"], weapon_id, attachment_id)
+    await interaction.response.send_message(message, ephemeral=not success)
+
+
+@weapon_modification_command.autocomplete("оружие")
+async def weapon_modification_weapon_autocomplete(interaction: discord.Interaction, current: str):
+    character = await bot.db.character(interaction.guild_id, interaction.user.id)
+    if not character:
+        return []
+    return [
+        app_commands.Choice(name=f'{item["name"]} #{item["id"]}'[:100], value=str(item["id"]))
+        for item in await bot.db.inventory(character["id"])
+        if item["category"] == "Оружие дальнего боя" and current.casefold() in item["name"].casefold()
+    ][:25]
+
+
+@weapon_modification_command.autocomplete("насадка")
+async def weapon_modification_attachment_autocomplete(interaction: discord.Interaction, current: str):
+    character = await bot.db.character(interaction.guild_id, interaction.user.id)
+    if not character:
+        return []
+    return [
+        app_commands.Choice(name=f'{item["name"]} #{item["id"]}'[:100], value=str(item["id"]))
+        for item in await bot.db.inventory(character["id"])
+        if item["category"] == "Насадка" and current.casefold() in item["name"].casefold()
+    ][:25]
+
+
 @bot.tree.command(name="навыки", description="Показать все навыки выбранного персонажа")
 @app_commands.check(require_master_access)
 async def skills_command(interaction: discord.Interaction, участник: discord.Member):
@@ -2980,6 +3055,9 @@ async def send_attack(
     gear = {weapon["id"]: int(weapon["durability"])} if weapon else {}
     equipped_items = [row for row in await bot.db.inventory(attacker["id"]) if row["equipped"]]
     auto_modifier = equipment_skill_modifier(equipped_items, skill)
+    if weapon:
+        auto_modifier += int(weapon.get("attachment_skill_bonus") or 0)
+        gear[weapon["id"]] = max(0, gear[weapon["id"]] + int(weapon.get("attachment_gear_modifier") or 0))
     if not ranged:
         auto_modifier += int(talent_effect(attacker, "familiar_melee", 0) or 0)
     if (
@@ -3022,6 +3100,8 @@ async def send_attack(
             success_modifier=success_modifier,
             attribute_override=attribute_override,
         )
+        if weapon and int(weapon.get("attachment_skill_bonus") or 0):
+            pool.skill_modifier_details.append(("Насадки", int(weapon["attachment_skill_bonus"])))
         if shot_index:
             pool.skill_modifier_details.append((f"\u041f\u043e\u0441\u043b\u0435\u0434\u0443\u044e\u0449\u0438\u0439 \u0432\u044b\u0441\u0442\u0440\u0435\u043b \u2116{shot_index + 1}", -shot_index))
         pools.append(pool)
