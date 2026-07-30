@@ -3515,10 +3515,12 @@ class NPCTargetAttackView(AttackView):
         before, after = await bot.db.damage_npc_attribute(npc["id"], self.target_attribute, damage)
         armor_change = shield_change = None
         if damage > 0:
-            if int(npc["defense"]) > 0:
-                armor_change = await bot.db.adjust_npc_protection(npc["id"], "Броня", -1)
-            if int(npc["shield"]) > 0:
-                shield_change = await bot.db.adjust_npc_protection(npc["id"], "Щит", -1)
+            armor_ones = sum(value == 1 for value in armor_dice)
+            shield_ones = sum(value == 1 for value in shield_dice)
+            if armor_ones:
+                armor_change = await bot.db.adjust_npc_protection(npc["id"], "Броня", -armor_ones)
+            if shield_ones:
+                shield_change = await bot.db.adjust_npc_protection(npc["id"], "Щит", -shield_ones)
         embed = self.attack_embed()
         lines = [
             f'Броня: {colored_dice(armor_dice, "gear")}',
@@ -3533,9 +3535,9 @@ class NPCTargetAttackView(AttackView):
             lines.append(f'Снижение {damage_type}: **−{min(raw_damage, reduction)}**')
         lines.extend((f'Урон: **{damage}**', f'{self.target_attribute}: **{before}/{maximum} → {after}/{maximum}**'))
         if armor_change:
-            lines.append(f'Броня повреждена: **{armor_change[0]} → {armor_change[1]}**')
+            lines.append(f'Броня повреждена на {armor_ones}: **{armor_change[0]} → {armor_change[1]}**')
         if shield_change:
-            lines.append(f'Щит повреждён: **{shield_change[0]} → {shield_change[1]}**')
+            lines.append(f'Щит повреждён на {shield_ones}: **{shield_change[0]} → {shield_change[1]}**')
         embed.add_field(name=f'Автоматическая защита · {npc["name"]}', value="\n".join(lines), inline=False)
         await interaction.response.edit_message(embed=embed, view=None)
 
