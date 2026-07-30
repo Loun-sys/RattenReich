@@ -2300,6 +2300,24 @@ class SkillRollView(discord.ui.View):
             embed.add_field(name="Цена риска", value=short("\n".join(costs)), inline=False)
         await interaction.response.edit_message(embed=embed, view=self)
 
+    @discord.ui.button(label="Завершить бросок", style=discord.ButtonStyle.success)
+    async def finish_button(self, interaction: discord.Interaction, _: discord.ui.Button):
+        if interaction.user.id != self.owner_id:
+            await interaction.response.send_message(
+                "Завершить бросок может только его владелец.", ephemeral=True
+            )
+            return
+        self.push_button.disabled = True
+        self.finish_button.disabled = True
+        embed = interaction.message.embeds[0]
+        embed.add_field(
+            name="Бросок завершён",
+            value="Игрок подтвердил отказ от дальнейшего пуша.",
+            inline=False,
+        )
+        self.stop()
+        await interaction.response.edit_message(embed=embed, view=self)
+
 
 def armor_indestructible_dice(item: dict, weapon: dict | None, distance: str | None) -> int:
     text = item.get("conditions") or item.get("description") or ""
@@ -2572,6 +2590,23 @@ class AttackView(discord.ui.View):
         embed = self.attack_embed()
         if costs:
             embed.add_field(name="Цена риска", value=short("\n".join(costs)), inline=False)
+        await interaction.response.edit_message(embed=embed, view=self)
+
+    @discord.ui.button(label="Завершить бросок", style=discord.ButtonStyle.secondary)
+    async def finish_roll_button(self, interaction: discord.Interaction, _: discord.ui.Button):
+        if self.resolved or interaction.user.id != self.attacker_id:
+            await interaction.response.send_message(
+                "Завершить бросок может только атакующий.", ephemeral=True
+            )
+            return
+        self.push_button.disabled = True
+        self.finish_roll_button.disabled = True
+        embed = self.attack_embed()
+        embed.add_field(
+            name="Бросок завершён",
+            value="Атакующий подтвердил отказ от дальнейшего пуша.",
+            inline=False,
+        )
         await interaction.response.edit_message(embed=embed, view=self)
 
     @discord.ui.button(label="Защищаться", style=discord.ButtonStyle.success)
@@ -3449,6 +3484,7 @@ class NPCTargetAttackView(AttackView):
     def __init__(self, *args, target_npc: dict, **kwargs):
         super().__init__(*args, **kwargs)
         self.target_npc = target_npc
+        self.remove_item(self.finish_roll_button)
 
     @discord.ui.button(label="Завершить атаку", style=discord.ButtonStyle.success)
     async def finish_npc_button(self, interaction: discord.Interaction, _: discord.ui.Button):
