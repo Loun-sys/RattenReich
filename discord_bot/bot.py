@@ -1977,7 +1977,7 @@ class SupplyWarehouseView(discord.ui.View):
             await interaction.response.send_message(message, ephemeral=True)
             return
         await self.refresh(interaction)
-        await interaction.followup.send(message, ephemeral=True)
+        await interaction.followup.send(f"{interaction.user.mention}: {message}", ephemeral=False)
 
     @discord.ui.button(label="Положить", style=discord.ButtonStyle.danger, row=2)
     async def deposit(self, interaction: discord.Interaction, _: discord.ui.Button):
@@ -1991,7 +1991,7 @@ class SupplyWarehouseView(discord.ui.View):
             await interaction.response.send_message(message, ephemeral=True)
             return
         await self.refresh(interaction)
-        await interaction.followup.send(message, ephemeral=True)
+        await interaction.followup.send(f"{interaction.user.mention}: {message}", ephemeral=False)
 
     @discord.ui.button(label="←", style=discord.ButtonStyle.secondary, row=3)
     async def previous(self, interaction: discord.Interaction, _: discord.ui.Button):
@@ -3356,7 +3356,7 @@ async def supply_warehouse_command(interaction: discord.Interaction):
     await interaction.response.send_message(
         embed=build_warehouse_embed(items, "warehouse", 0),
         view=SupplyWarehouseView(character, items),
-        ephemeral=True,
+        ephemeral=False,
     )
 
 
