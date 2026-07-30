@@ -3196,10 +3196,14 @@ async def supply(
     if not character:
         await interaction.response.send_message("У выбранного участника нет зарегистрированного персонажа.", ephemeral=True)
         return
-    delta = количество if действие.value == "add" else -количество
-    value = max(0, character["supply_forms"] + delta)
+    before = int(character["supply_forms"])
+    requested_delta = количество if действие.value == "add" else -количество
+    value = max(0, before + requested_delta)
+    applied_delta = value - before
     await bot.db.update_character(character["id"], "supply_forms", value)
-    await interaction.response.send_message(f'{участник.mention}: бланки снабжения — **{value}**.')
+    await interaction.response.send_message(
+        f'{участник.mention}: бланки снабжения — **{applied_delta:+d} → {value}**.'
+    )
 
 
 @bot.tree.command(name="воля", description="Изменить текущую Волю персонажа")
