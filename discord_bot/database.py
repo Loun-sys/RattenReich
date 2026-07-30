@@ -118,6 +118,17 @@ CREATE TABLE IF NOT EXISTS luck_modifiers (
     percent INTEGER NOT NULL DEFAULT 0 CHECK(percent BETWEEN -100 AND 100),
     updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
+CREATE TABLE IF NOT EXISTS supply_warehouse (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    guild_id INTEGER NOT NULL,
+    item_id INTEGER NOT NULL REFERENCES item_catalog(id) ON DELETE CASCADE,
+    durability INTEGER NOT NULL DEFAULT 0,
+    ammo INTEGER,
+    quantity INTEGER NOT NULL DEFAULT 1,
+    deposited_by INTEGER,
+    deposited_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+CREATE INDEX IF NOT EXISTS idx_supply_warehouse_guild ON supply_warehouse(guild_id);
 CREATE TABLE IF NOT EXISTS inventory (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     character_id INTEGER NOT NULL REFERENCES characters(id) ON DELETE CASCADE,
@@ -1077,35 +1088,6 @@ class Database:
             if balance < price:
                 await db.rollback()
                 return False, f"Недостаточно БС: требуется {price}, доступно {balance}.", balance
-            if item["size"] in {"Малый", "Большой"}:
-                attribute = "Ловкость" if item["size"] == "Малый" else "Телосложение"
-                capacities = await db.execute_fetchall(
-                    "SELECT max_value FROM attributes WHERE character_id=? AND name=?",
-                    (character_id, attribute),
-                )
-                occupied_rows = await db.execute_fetchall(
-                    """SELECT COALESCE(SUM(inventory.quantity),0) occupied
-                       FROM inventory JOIN item_catalog ON item_catalog.id=inventory.item_id
-                       WHERE inventory.character_id=? AND item_catalog.size=?""",
-                    (character_id, item["size"]),
-                )
-                capacity = int(capacities[0]["max_value"])
-                slot_talent = "Карманный склад" if item["size"] == "Малый" else "Вьючный ремень"
-                talent_rows = await db.execute_fetchall(
-                    "SELECT 1 FROM talents WHERE character_id=? AND lower(name)=lower(?) LIMIT 1",
-                    (character_id, slot_talent),
-                )
-                capacity += 1 if talent_rows else 0
-                pending_rows = await db.execute_fetchall(
-                    """SELECT COUNT(*) pending FROM purchase_orders po
-                       JOIN item_catalog ic ON ic.id=po.item_id
-                       WHERE po.character_id=? AND po.status='pending' AND ic.size=?""",
-                    (character_id, item["size"]),
-                )
-                occupied = int(occupied_rows[0]["occupied"]) + int(pending_rows[0]["pending"])
-                if occupied >= capacity:
-                    await db.rollback()
-                    return False, f"Нет свободного слота: {occupied}/{capacity}.", balance
             balance -= price
             await db.execute(
                 """INSERT INTO purchase_orders(
@@ -1158,25 +1140,25 @@ class Database:
                 item = dict(item_rows[0])
                 if "расходник" in str(item.get("properties") or "").casefold():
                     stacks = await db.execute_fetchall(
-                        """SELECT id FROM inventory
-                           WHERE character_id=? AND item_id=? AND equipped=0
+                        """SELECT id FROM supply_warehouse
+                           WHERE guild_id=? AND item_id=? AND durability=? AND ammo IS ?
                            ORDER BY id LIMIT 1""",
-                        (order["character_id"], order["item_id"]),
+                        (guild_id, order["item_id"], item["max_durability"], item["ammo_max"]),
                     )
                     if stacks:
-                        await db.execute("UPDATE inventory SET quantity=quantity+1 WHERE id=?", (stacks[0]["id"],))
+                        await db.execute("UPDATE supply_warehouse SET quantity=quantity+1 WHERE id=?", (stacks[0]["id"],))
                     else:
                         await db.execute(
-                            "INSERT INTO inventory(character_id,item_id,durability,ammo) VALUES(?,?,?,?)",
-                            (order["character_id"], order["item_id"], item["max_durability"], item["ammo_max"]),
+                            "INSERT INTO supply_warehouse(guild_id,item_id,durability,ammo,deposited_by) VALUES(?,?,?,?,?)",
+                            (guild_id, order["item_id"], item["max_durability"], item["ammo_max"], reviewer_id),
                         )
                 else:
                     await db.execute(
-                        "INSERT INTO inventory(character_id,item_id,durability,ammo) VALUES(?,?,?,?)",
-                        (order["character_id"], order["item_id"], item["max_durability"], item["ammo_max"]),
+                        "INSERT INTO supply_warehouse(guild_id,item_id,durability,ammo,deposited_by) VALUES(?,?,?,?,?)",
+                        (guild_id, order["item_id"], item["max_durability"], item["ammo_max"], reviewer_id),
                     )
                 status = "approved"
-                message = f'Заявка одобрена: {order["item_name"]} выдан игроку.'
+                message = f'Заявка одобрена: {order["item_name"]} добавлен на склад снабжения.'
             else:
                 await db.execute(
                     "UPDATE characters SET supply_forms=supply_forms+? WHERE id=?",
@@ -1193,6 +1175,122 @@ class Database:
             await db.commit()
             order["status"] = status
             return True, message, order
+
+    async def supply_warehouse_items(self, guild_id: int) -> list[dict[str, Any]]:
+        async with self.connect() as db:
+            rows = await db.execute_fetchall(
+                """SELECT sw.*,ic.name,ic.size,ic.category,ic.max_durability,ic.ammo_max,
+                          ic.properties,ic.conditions
+                   FROM supply_warehouse sw JOIN item_catalog ic ON ic.id=sw.item_id
+                   WHERE sw.guild_id=? ORDER BY ic.category,ic.name,sw.id""",
+                (guild_id,),
+            )
+            return [dict(row) for row in rows]
+
+    async def take_from_supply_warehouse(
+        self, guild_id: int, character_id: int, warehouse_id: int,
+    ) -> tuple[bool, str]:
+        async with self.connect() as db:
+            await db.execute("BEGIN IMMEDIATE")
+            chars = await db.execute_fetchall("SELECT guild_id FROM characters WHERE id=?", (character_id,))
+            rows = await db.execute_fetchall(
+                """SELECT sw.*,ic.name,ic.size,ic.max_durability,ic.properties
+                   FROM supply_warehouse sw JOIN item_catalog ic ON ic.id=sw.item_id
+                   WHERE sw.id=? AND sw.guild_id=?""",
+                (warehouse_id, guild_id),
+            )
+            if not chars or int(chars[0]["guild_id"]) != guild_id or not rows:
+                await db.rollback()
+                return False, "Предмет на складе больше не найден."
+            item = dict(rows[0])
+            if item["size"] in {"Малый", "Большой"}:
+                attribute = "Ловкость" if item["size"] == "Малый" else "Телосложение"
+                capacities = await db.execute_fetchall(
+                    "SELECT max_value FROM attributes WHERE character_id=? AND name=?",
+                    (character_id, attribute),
+                )
+                occupied_rows = await db.execute_fetchall(
+                    """SELECT COALESCE(SUM(i.quantity),0) occupied FROM inventory i
+                       JOIN item_catalog ic ON ic.id=i.item_id
+                       WHERE i.character_id=? AND ic.size=?""",
+                    (character_id, item["size"]),
+                )
+                capacity = int(capacities[0]["max_value"])
+                slot_talent = "Карманный склад" if item["size"] == "Малый" else "Вьючный ремень"
+                talent = await db.execute_fetchall(
+                    "SELECT 1 FROM talents WHERE character_id=? AND lower(name)=lower(?) LIMIT 1",
+                    (character_id, slot_talent),
+                )
+                capacity += 1 if talent else 0
+                occupied = int(occupied_rows[0]["occupied"])
+                if occupied >= capacity:
+                    await db.rollback()
+                    return False, f"Нет свободного слота: {occupied}/{capacity}."
+            consumable = "расходник" in str(item.get("properties") or "").casefold()
+            stacks = await db.execute_fetchall(
+                "SELECT id FROM inventory WHERE character_id=? AND item_id=? AND equipped=0 ORDER BY id LIMIT 1",
+                (character_id, item["item_id"]),
+            ) if consumable else []
+            if stacks:
+                await db.execute("UPDATE inventory SET quantity=quantity+1 WHERE id=?", (stacks[0]["id"],))
+            else:
+                await db.execute(
+                    "INSERT INTO inventory(character_id,item_id,durability,ammo,quantity,equipped) VALUES(?,?,?,?,1,0)",
+                    (character_id, item["item_id"], item["durability"], item["ammo"]),
+                )
+            if int(item["quantity"]) > 1:
+                await db.execute("UPDATE supply_warehouse SET quantity=quantity-1 WHERE id=?", (warehouse_id,))
+            else:
+                await db.execute("DELETE FROM supply_warehouse WHERE id=?", (warehouse_id,))
+            await db.commit()
+            return True, f'«{item["name"]}» взят со склада снабжения.'
+
+    async def deposit_to_supply_warehouse(
+        self, guild_id: int, character_id: int, inventory_id: int, user_id: int,
+    ) -> tuple[bool, str]:
+        async with self.connect() as db:
+            await db.execute("BEGIN IMMEDIATE")
+            rows = await db.execute_fetchall(
+                """SELECT i.*,c.guild_id,ic.name,ic.properties FROM inventory i
+                   JOIN characters c ON c.id=i.character_id
+                   JOIN item_catalog ic ON ic.id=i.item_id
+                   WHERE i.id=? AND i.character_id=?""",
+                (inventory_id, character_id),
+            )
+            if not rows or int(rows[0]["guild_id"]) != guild_id:
+                await db.rollback()
+                return False, "Предмет в инвентаре не найден."
+            item = dict(rows[0])
+            if int(item["equipped"]):
+                await db.rollback()
+                return False, "Сначала снимите предмет."
+            links = await db.execute_fetchall(
+                "SELECT 1 FROM weapon_attachments WHERE weapon_inventory_id=? OR attachment_inventory_id=? LIMIT 1",
+                (inventory_id, inventory_id),
+            )
+            if links:
+                await db.rollback()
+                return False, "Сначала снимите все насадки с предмета или оружия."
+            consumable = "расходник" in str(item.get("properties") or "").casefold()
+            stacks = await db.execute_fetchall(
+                """SELECT id FROM supply_warehouse WHERE guild_id=? AND item_id=?
+                   AND durability=? AND ammo IS ? ORDER BY id LIMIT 1""",
+                (guild_id, item["item_id"], item["durability"], item["ammo"]),
+            ) if consumable else []
+            if stacks:
+                await db.execute("UPDATE supply_warehouse SET quantity=quantity+1 WHERE id=?", (stacks[0]["id"],))
+            else:
+                await db.execute(
+                    """INSERT INTO supply_warehouse(guild_id,item_id,durability,ammo,quantity,deposited_by)
+                       VALUES(?,?,?,?,1,?)""",
+                    (guild_id, item["item_id"], item["durability"], item["ammo"], user_id),
+                )
+            if int(item["quantity"]) > 1:
+                await db.execute("UPDATE inventory SET quantity=quantity-1 WHERE id=?", (inventory_id,))
+            else:
+                await db.execute("DELETE FROM inventory WHERE id=?", (inventory_id,))
+            await db.commit()
+            return True, f'«{item["name"]}» помещён на склад снабжения.'
 
     async def talent_names(self, character_id: int) -> set[str]:
         async with self.connect() as db:

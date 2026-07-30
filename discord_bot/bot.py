@@ -379,7 +379,15 @@ async def apply_injury_roll_damage(character: dict, skill: str) -> str:
 
 def equipment_skill_modifier(items: list[dict], skill: str) -> int:
     total = 0
-    pattern = re.compile(rf"([+−-]\d+)\s+к\s+{re.escape(skill)}", re.IGNORECASE)
+    skill_stems = {
+        "Выносливость": "вынослив", "Сила": "сил", "Драка": "драк",
+        "Скрытность": "скрытност", "Проворство": "проворств", "Стрельба": "стрельб",
+        "Наблюдательность": "наблюдательност", "Анализ": "анализ", "Знания": "знани",
+        "Проницательность": "проницательност", "Влияние": "влияни",
+        "Воодушевление": "воодушевлен", "Снабжение": "снабжен",
+        "Лечение": "лечен", "Обращение": "обращен", "Защита": "защит",
+    }
+    skill_stem = skill_stems.get(skill, skill.casefold())
     attribute = SKILL_ATTRIBUTES.get(skill, "")
     for item in items:
         try:
@@ -390,8 +398,10 @@ def equipment_skill_modifier(items: list[dict], skill: str) -> int:
         total += int(structured_skills.get(skill, 0))
         total += int(structured_attributes.get(attribute, 0))
         text = item.get("conditions") or ""
-        for value in pattern.findall(text):
-            total += int(value.replace("−", "-"))
+        for sentence in re.split(r"[.;]", text):
+            bonus = re.search(r"([+−-]\d+)\s+к\s+(.+)", sentence, re.IGNORECASE)
+            if bonus and skill_stem in bonus.group(2).casefold():
+                total += int(bonus.group(1).replace("−", "-"))
     return total
 
 
@@ -1850,7 +1860,7 @@ class SupplyOrdersView(discord.ui.View):
             member = interaction.guild.get_member(int(order["user_id"])) if interaction.guild else None
             if member:
                 try:
-                    result = "одобрена — предмет добавлен в инвентарь" if approve else f'отклонена — возвращено {order["paid_price"]} БС'
+                    result = "одобрена — предмет добавлен на склад снабжения" if approve else f'отклонена — возвращено {order["paid_price"]} БС'
                     await member.send(f'Ваша заявка на **{order["item_name"]}** {result}.')
                 except discord.HTTPException:
                     pass
@@ -1870,6 +1880,126 @@ class SupplyOrdersView(discord.ui.View):
     @discord.ui.button(label="→", style=discord.ButtonStyle.secondary, row=2)
     async def next(self, interaction: discord.Interaction, _: discord.ui.Button):
         await self.refresh(interaction, self.page + 1)
+
+
+WAREHOUSE_PAGE_SIZE = 20
+
+
+def build_warehouse_embed(items: list[dict], mode: str, page: int) -> discord.Embed:
+    pages = max(1, (len(items) + WAREHOUSE_PAGE_SIZE - 1) // WAREHOUSE_PAGE_SIZE)
+    page = max(0, min(page, pages - 1))
+    visible = items[page * WAREHOUSE_PAGE_SIZE:(page + 1) * WAREHOUSE_PAGE_SIZE]
+    lines = []
+    for item in visible:
+        state = f' ×{item["quantity"]}' if int(item.get("quantity") or 1) > 1 else ""
+        if item.get("max_durability"):
+            state += f' · прочность {item["durability"]}/{item["max_durability"]}'
+        if item.get("ammo") is not None:
+            state += f' · боезапас {item["ammo"]}/{item.get("ammo_max") or 0}'
+        lines.append(f'**{item["name"]}**{state}')
+    title = "Склад снабжения" if mode == "warehouse" else "Передача на склад · мой инвентарь"
+    empty = "Склад пуст." if mode == "warehouse" else "Нет доступных для передачи предметов."
+    embed = discord.Embed(title=title, description="\n".join(lines) or empty, color=0x745B38)
+    embed.set_footer(text=f"Страница {page + 1}/{pages} · предметов: {len(items)}")
+    return embed
+
+
+class WarehouseItemSelect(discord.ui.Select):
+    def __init__(self, owner_view: "SupplyWarehouseView", items: list[dict]):
+        self.owner_view = owner_view
+        options = []
+        for item in items:
+            suffix = f' ×{item["quantity"]}' if int(item.get("quantity") or 1) > 1 else ""
+            options.append(discord.SelectOption(
+                label=f'{item["name"]}{suffix}'[:100],
+                value=str(item["id"]),
+                description=f'{item["category"]} · {item["size"]}'[:100],
+            ))
+        super().__init__(placeholder="Выберите предмет", min_values=1, max_values=1, options=options, row=0)
+
+    async def callback(self, interaction: discord.Interaction):
+        self.owner_view.selected_id = int(self.values[0])
+        await interaction.response.edit_message(view=self.owner_view)
+
+
+class SupplyWarehouseView(discord.ui.View):
+    def __init__(self, character: dict, items: list[dict], mode: str = "warehouse", page: int = 0):
+        super().__init__(timeout=600)
+        self.character = character
+        self.owner_id = int(character["user_id"])
+        self.mode = mode
+        self.items = items
+        self.pages = max(1, (len(items) + WAREHOUSE_PAGE_SIZE - 1) // WAREHOUSE_PAGE_SIZE)
+        self.page = max(0, min(page, self.pages - 1))
+        self.selected_id: int | None = None
+        visible = items[self.page * WAREHOUSE_PAGE_SIZE:(self.page + 1) * WAREHOUSE_PAGE_SIZE]
+        if visible:
+            self.add_item(WarehouseItemSelect(self, visible))
+        self.take.disabled = mode != "warehouse" or not visible
+        self.deposit.disabled = mode != "inventory" or not visible
+        self.previous.disabled = self.page == 0
+        self.next.disabled = self.page >= self.pages - 1
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if interaction.user.id != self.owner_id:
+            await interaction.response.send_message("Этим меню может управлять только открывший его игрок.", ephemeral=True)
+            return False
+        return True
+
+    async def load(self, mode: str) -> list[dict]:
+        if mode == "warehouse":
+            return await bot.db.supply_warehouse_items(self.character["guild_id"])
+        return [item for item in await bot.db.inventory(self.character["id"]) if not item["equipped"]]
+
+    async def refresh(self, interaction: discord.Interaction, mode: str | None = None, page: int | None = None):
+        target_mode = mode or self.mode
+        items = await self.load(target_mode)
+        view = SupplyWarehouseView(self.character, items, target_mode, self.page if page is None else page)
+        await interaction.response.edit_message(embed=build_warehouse_embed(items, target_mode, view.page), view=view)
+
+    @discord.ui.button(label="Склад", style=discord.ButtonStyle.primary, row=1)
+    async def warehouse(self, interaction: discord.Interaction, _: discord.ui.Button):
+        await self.refresh(interaction, "warehouse", 0)
+
+    @discord.ui.button(label="Мой инвентарь", style=discord.ButtonStyle.secondary, row=1)
+    async def inventory(self, interaction: discord.Interaction, _: discord.ui.Button):
+        await self.refresh(interaction, "inventory", 0)
+
+    @discord.ui.button(label="Взять", style=discord.ButtonStyle.success, row=2)
+    async def take(self, interaction: discord.Interaction, _: discord.ui.Button):
+        if self.selected_id is None:
+            await interaction.response.send_message("Сначала выберите предмет.", ephemeral=True)
+            return
+        success, message = await bot.db.take_from_supply_warehouse(
+            self.character["guild_id"], self.character["id"], self.selected_id
+        )
+        if not success:
+            await interaction.response.send_message(message, ephemeral=True)
+            return
+        await self.refresh(interaction)
+        await interaction.followup.send(message, ephemeral=True)
+
+    @discord.ui.button(label="Положить", style=discord.ButtonStyle.danger, row=2)
+    async def deposit(self, interaction: discord.Interaction, _: discord.ui.Button):
+        if self.selected_id is None:
+            await interaction.response.send_message("Сначала выберите предмет.", ephemeral=True)
+            return
+        success, message = await bot.db.deposit_to_supply_warehouse(
+            self.character["guild_id"], self.character["id"], self.selected_id, interaction.user.id
+        )
+        if not success:
+            await interaction.response.send_message(message, ephemeral=True)
+            return
+        await self.refresh(interaction)
+        await interaction.followup.send(message, ephemeral=True)
+
+    @discord.ui.button(label="←", style=discord.ButtonStyle.secondary, row=3)
+    async def previous(self, interaction: discord.Interaction, _: discord.ui.Button):
+        await self.refresh(interaction, page=self.page - 1)
+
+    @discord.ui.button(label="→", style=discord.ButtonStyle.secondary, row=3)
+    async def next(self, interaction: discord.Interaction, _: discord.ui.Button):
+        await self.refresh(interaction, page=self.page + 1)
 
 
 TALENT_PAGE_SIZE = 5
@@ -3208,6 +3338,20 @@ async def supply_orders_command(interaction: discord.Interaction):
     await interaction.response.send_message(
         embed=build_supply_orders_embed(orders, 0),
         view=SupplyOrdersView(interaction.user.id, interaction.guild_id, orders),
+        ephemeral=True,
+    )
+
+
+@bot.tree.command(name="склад-снабжения", description="Взять предмет с общего склада или положить свой")
+async def supply_warehouse_command(interaction: discord.Interaction):
+    character = await bot.db.character(interaction.guild_id, interaction.user.id)
+    if not character:
+        await interaction.response.send_message("Сначала зарегистрируйте персонажа.", ephemeral=True)
+        return
+    items = await bot.db.supply_warehouse_items(interaction.guild_id)
+    await interaction.response.send_message(
+        embed=build_warehouse_embed(items, "warehouse", 0),
+        view=SupplyWarehouseView(character, items),
         ephemeral=True,
     )
 
