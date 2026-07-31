@@ -3619,9 +3619,10 @@ async def free_dice_roll_command(
             "Укажите хотя бы один куб для броска.", ephemeral=True,
         )
         return
-    yellow_rolls = d6(желтые)
-    green_rolls = d6(зеленые)
-    negative_rolls = d6(негативные)
+    luck_percent = await bot.db.get_luck_modifier(interaction.user.id)
+    yellow_rolls = d6_with_luck(желтые, luck_percent)
+    green_rolls = d6_with_luck(зеленые, luck_percent)
+    negative_rolls = d6_with_luck(негативные, -luck_percent)
     positive_successes = sum(value == 6 for value in yellow_rolls + green_rolls)
     negative_successes = sum(value == 6 for value in negative_rolls)
     embed = discord.Embed(title="Свободный бросок", color=0x6E654F)
