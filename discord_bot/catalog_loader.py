@@ -27,6 +27,15 @@ MEDICAL_CONSUMABLES = {
 }
 
 
+MULTI_USE_CONSUMABLES = {
+    "Сигареты «Фельдграу»": 3,
+    "Сигареты «Штальраух»": 2,
+    "Папиросы «Кайзеркроне»": 2,
+    "Шнапс «Айзернер Гренадир»": 2,
+    "Горькая «Рейхсмарш»": 3,
+    "Бренди «Кайзерблут»": 2,
+}
+
 def catalog_price_increase(price: int) -> int:
     if price <= 0:
         return 0
@@ -151,6 +160,13 @@ def _protection_price(item: dict[str, Any]) -> int:
 
 def _balance_item(item: dict[str, Any]) -> dict[str, Any]:
     category = str(item.get("category") or "")
+    uses = MULTI_USE_CONSUMABLES.get(str(item.get("name") or ""))
+    if uses:
+        item["max_durability"] = uses
+        usage_text = f"Использований: {uses}."
+        if usage_text not in str(item.get("conditions") or ""):
+            item["conditions"] = f'{usage_text} {item.get("conditions") or ""}'.strip()
+            item["description"] = item["conditions"]
     if category.startswith("Оружие "):
         item["access"] = _weapon_access(item)
     elif category == "Броня":

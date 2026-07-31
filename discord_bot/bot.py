@@ -20,6 +20,7 @@ from dotenv import load_dotenv
 
 from attachment_data import ATTACHMENT_BY_NAME, compatible
 from card_renderer import CardRenderer
+from catalog_loader import MULTI_USE_CONSUMABLES
 from constants import ATTRIBUTES, CLASSES, ITEM_CATEGORIES, ITEM_SIZES, RACES, RANGES, RANKS, SKILLS
 from database import Database
 from trauma_data import MENTAL_TRAUMAS, PHYSICAL_TRAUMAS, SOCIAL_TRAUMAS
@@ -1181,7 +1182,9 @@ async def build_inventory_embed(
     lines = []
     for item in visible_items:
         details = []
-        if item["category"] in {"Броня", "Щит"}:
+        if item["name"] in MULTI_USE_CONSUMABLES:
+            details.append(f'использований {item["durability"]}/{item["max_durability"]}')
+        elif item["category"] in {"Броня", "Щит"}:
             details.append(f'защита {item["durability"]}/{item["max_durability"]}')
         else:
             details.append(f'{item["durability"]} качества')
@@ -1892,7 +1895,9 @@ def build_warehouse_embed(items: list[dict], mode: str, page: int) -> discord.Em
     lines = []
     for item in visible:
         state = f' ×{item["quantity"]}' if int(item.get("quantity") or 1) > 1 else ""
-        if item.get("max_durability"):
+        if item["name"] in MULTI_USE_CONSUMABLES:
+            state += f' · использований {item["durability"]}/{item["max_durability"]}'
+        elif item.get("max_durability"):
             state += f' · прочность {item["durability"]}/{item["max_durability"]}'
         if item.get("ammo") is not None:
             state += f' · боезапас {item["ammo"]}/{item.get("ammo_max") or 0}'
@@ -3463,7 +3468,10 @@ async def item_transfer_autocomplete(interaction: discord.Interaction, current: 
         return []
     return [
         app_commands.Choice(
-            name=f'{item["name"]} ×{item["quantity"]}'[:100],
+            name=(
+                f'{item["name"]} ×{item["quantity"]}'
+                + (f' · использований {item["durability"]}/{item["max_durability"]}' if item["name"] in MULTI_USE_CONSUMABLES else "")
+            )[:100],
             value=item["name"],
         )
         for item in await bot.db.inventory(character["id"])
@@ -4344,7 +4352,24 @@ async def use_consumable_command(
                     f'{", ".join(affected)} на {hours} ч.'
                 )
 
-    removed = await bot.db.remove_inventory_by_name(character["id"], item["name"], 1)
+    if item["name"] in MULTI_USE_CONSUMABLES:
+        usage = await bot.db.consume_multi_use_item(character["id"], item["id"], item["name"])
+        removed = usage is not None
+        if usage and usage["quantity"] > 0:
+            if usage["finished_item"]:
+                lines.append(
+                    f'Пачка или бутылка закончилась. Следующая: **{usage["remaining_uses"]}/{usage["max_uses"]}** использований; '
+                    f'предметов в стопке: **{usage["quantity"]}**.'
+                )
+            else:
+                lines.append(
+                    f'Осталось использований: **{usage["remaining_uses"]}/{usage["max_uses"]}**; '
+                    f'предметов в стопке: **{usage["quantity"]}**.'
+                )
+        elif usage:
+            lines.append("Последняя пачка или бутылка закончилась.")
+    else:
+        removed = await bot.db.remove_inventory_by_name(character["id"], item["name"], 1)
     if not removed:
         await interaction.response.send_message("Расходник уже отсутствует.", ephemeral=True)
         return
@@ -4364,7 +4389,10 @@ async def consumable_autocomplete(interaction: discord.Interaction, current: str
         return []
     return [
         app_commands.Choice(
-            name=f'{item["name"]} ×{item["quantity"]}'[:100],
+            name=(
+                f'{item["name"]} ×{item["quantity"]}'
+                + (f' · использований {item["durability"]}/{item["max_durability"]}' if item["name"] in MULTI_USE_CONSUMABLES else "")
+            )[:100],
             value=item["name"],
         )
         for item in await bot.db.inventory(character["id"])

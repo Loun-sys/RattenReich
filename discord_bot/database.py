@@ -8,7 +8,7 @@ from typing import Any
 
 import aiosqlite
 
-from catalog_loader import MEDICAL_CONSUMABLES, catalog_price_increase, load_catalog
+from catalog_loader import MEDICAL_CONSUMABLES, MULTI_USE_CONSUMABLES, catalog_price_increase, load_catalog
 from attachment_data import ATTACHMENT_BY_NAME, apply_attachments, compatible
 from constants import ATTRIBUTES, CLASSES, SKILLS
 from talent_data import TALENTS
@@ -337,6 +337,27 @@ class Database:
                     "INSERT INTO app_migrations(key) VALUES(?)",
                     (equipment_price_migration,),
                 )
+            multi_use_migration = "multi_use_consumables_2026_07_31"
+            multi_use_applied = await db.execute_fetchall(
+                "SELECT 1 FROM app_migrations WHERE key=?",
+                (multi_use_migration,),
+            )
+            if not multi_use_applied:
+                for item_name, uses in MULTI_USE_CONSUMABLES.items():
+                    await db.execute(
+                        """UPDATE inventory SET durability=? WHERE item_id IN
+                           (SELECT id FROM item_catalog WHERE name=?)""",
+                        (uses, item_name),
+                    )
+                    await db.execute(
+                        """UPDATE supply_warehouse SET durability=? WHERE item_id IN
+                           (SELECT id FROM item_catalog WHERE name=?)""",
+                        (uses, item_name),
+                    )
+                await db.execute(
+                    "INSERT INTO app_migrations(key) VALUES(?)",
+                    (multi_use_migration,),
+                )
             await db.commit()
         await self.reload_base_catalog()
         await self.merge_stackable_inventory()
@@ -377,12 +398,12 @@ class Database:
         merged = 0
         async with self.connect() as db:
             groups = await db.execute_fetchall(
-                """SELECT inventory.character_id,inventory.item_id,
+                """SELECT inventory.character_id,inventory.item_id,inventory.durability,inventory.ammo,
                           MIN(inventory.id) keep_id,SUM(inventory.quantity) total,COUNT(*) rows_count
                    FROM inventory
                    JOIN item_catalog ON item_catalog.id=inventory.item_id
                    WHERE lower(item_catalog.properties) LIKE '%расходник%'
-                   GROUP BY inventory.character_id,inventory.item_id
+                   GROUP BY inventory.character_id,inventory.item_id,inventory.durability,inventory.ammo
                    HAVING COUNT(*)>1"""
             )
             for group in groups:
@@ -391,8 +412,9 @@ class Database:
                     (group["total"], group["keep_id"]),
                 )
                 cursor = await db.execute(
-                    "DELETE FROM inventory WHERE character_id=? AND item_id=? AND id<>?",
-                    (group["character_id"], group["item_id"], group["keep_id"]),
+                    """DELETE FROM inventory WHERE character_id=? AND item_id=?
+                       AND durability=? AND ammo IS ? AND id<>?""",
+                    (group["character_id"], group["item_id"], group["durability"], group["ammo"], group["keep_id"]),
                 )
                 merged += cursor.rowcount
             await db.commit()
@@ -1069,9 +1091,9 @@ class Database:
             if "расходник" in str(item.get("properties") or "").casefold():
                 rows = await db.execute_fetchall(
                     """SELECT id FROM inventory
-                       WHERE character_id=? AND item_id=? AND equipped=0
+                       WHERE character_id=? AND item_id=? AND durability=? AND ammo IS ? AND equipped=0
                        ORDER BY id LIMIT 1""",
-                    (character_id, item["id"]),
+                    (character_id, item["id"], item["max_durability"], item["ammo_max"]),
                 )
                 if rows:
                     row_id = int(rows[0]["id"])
@@ -1277,8 +1299,8 @@ class Database:
                     return False, f"Нет свободного слота: {occupied}/{capacity}."
             consumable = "расходник" in str(item.get("properties") or "").casefold()
             stacks = await db.execute_fetchall(
-                "SELECT id FROM inventory WHERE character_id=? AND item_id=? AND equipped=0 ORDER BY id LIMIT 1",
-                (character_id, item["item_id"]),
+                "SELECT id FROM inventory WHERE character_id=? AND item_id=? AND durability=? AND ammo IS ? AND equipped=0 ORDER BY id LIMIT 1",
+                (character_id, item["item_id"], item["durability"], item["ammo"]),
             ) if consumable else []
             if stacks:
                 await db.execute("UPDATE inventory SET quantity=quantity+1 WHERE id=?", (stacks[0]["id"],))
@@ -1335,7 +1357,13 @@ class Database:
                     (guild_id, item["item_id"], item["durability"], item["ammo"], user_id),
                 )
             if int(item["quantity"]) > 1:
-                await db.execute("UPDATE inventory SET quantity=quantity-1 WHERE id=?", (inventory_id,))
+                if item["name"] in MULTI_USE_CONSUMABLES:
+                    await db.execute(
+                        "UPDATE inventory SET quantity=quantity-1,durability=? WHERE id=?",
+                        (MULTI_USE_CONSUMABLES[item["name"]], inventory_id),
+                    )
+                else:
+                    await db.execute("UPDATE inventory SET quantity=quantity-1 WHERE id=?", (inventory_id,))
             else:
                 await db.execute("DELETE FROM inventory WHERE id=?", (inventory_id,))
             await db.commit()
@@ -1488,8 +1516,8 @@ class Database:
                 taken = min(int(row["quantity"]), remaining)
                 if stackable:
                     targets = await db.execute_fetchall(
-                        "SELECT id FROM inventory WHERE character_id=? AND item_id=? AND equipped=0 LIMIT 1",
-                        (recipient_id, row["item_id"]),
+                        "SELECT id FROM inventory WHERE character_id=? AND item_id=? AND durability=? AND ammo IS ? AND equipped=0 LIMIT 1",
+                        (recipient_id, row["item_id"], row["durability"], row["ammo"]),
                     )
                     if targets:
                         await db.execute(
@@ -1513,13 +1541,64 @@ class Database:
                 if taken == int(row["quantity"]):
                     await db.execute("DELETE FROM inventory WHERE id=?", (row["id"],))
                 else:
-                    await db.execute(
-                        "UPDATE inventory SET quantity=quantity-? WHERE id=?",
-                        (taken, row["id"]),
-                    )
+                    if row["name"] in MULTI_USE_CONSUMABLES:
+                        await db.execute(
+                            "UPDATE inventory SET quantity=quantity-?,durability=? WHERE id=?",
+                            (taken, MULTI_USE_CONSUMABLES[row["name"]], row["id"]),
+                        )
+                    else:
+                        await db.execute(
+                            "UPDATE inventory SET quantity=quantity-? WHERE id=?",
+                            (taken, row["id"]),
+                        )
                 remaining -= taken
             await db.commit()
             return True, f'Передано: {item["name"]} ×{quantity}.'
+
+    async def consume_multi_use_item(
+        self, character_id: int, inventory_id: int, item_name: str,
+    ) -> dict[str, int] | None:
+        max_uses = MULTI_USE_CONSUMABLES.get(item_name)
+        if not max_uses:
+            return None
+        async with self.connect() as db:
+            await db.execute("BEGIN IMMEDIATE")
+            rows = await db.execute_fetchall(
+                """SELECT inventory.id,inventory.quantity,inventory.durability,item_catalog.name
+                   FROM inventory JOIN item_catalog ON item_catalog.id=inventory.item_id
+                   WHERE inventory.id=? AND inventory.character_id=?""",
+                (inventory_id, character_id),
+            )
+            if not rows or rows[0]["name"] != item_name:
+                await db.rollback()
+                return None
+            row = rows[0]
+            quantity = int(row["quantity"])
+            remaining = int(row["durability"]) - 1
+            finished_item = remaining <= 0
+            if not finished_item:
+                await db.execute(
+                    "UPDATE inventory SET durability=? WHERE id=?",
+                    (remaining, inventory_id),
+                )
+            elif quantity > 1:
+                quantity -= 1
+                remaining = max_uses
+                await db.execute(
+                    "UPDATE inventory SET quantity=?,durability=? WHERE id=?",
+                    (quantity, remaining, inventory_id),
+                )
+            else:
+                quantity = 0
+                remaining = 0
+                await db.execute("DELETE FROM inventory WHERE id=?", (inventory_id,))
+            await db.commit()
+            return {
+                "remaining_uses": remaining,
+                "max_uses": max_uses,
+                "quantity": quantity,
+                "finished_item": int(finished_item),
+            }
 
     async def remove_inventory_by_name(self, character_id: int, name: str, quantity: int) -> bool:
         if quantity < 1:
@@ -1547,10 +1626,16 @@ class Database:
                 if taken == row_quantity:
                     await db.execute("DELETE FROM inventory WHERE id=?", (row["id"],))
                 else:
-                    await db.execute(
-                        "UPDATE inventory SET quantity=quantity-? WHERE id=?",
-                        (taken, row["id"]),
-                    )
+                    if row["name"] in MULTI_USE_CONSUMABLES:
+                        await db.execute(
+                            "UPDATE inventory SET quantity=quantity-?,durability=? WHERE id=?",
+                            (taken, MULTI_USE_CONSUMABLES[row["name"]], row["id"]),
+                        )
+                    else:
+                        await db.execute(
+                            "UPDATE inventory SET quantity=quantity-? WHERE id=?",
+                            (taken, row["id"]),
+                        )
                 remaining -= taken
             await db.commit()
             return True
