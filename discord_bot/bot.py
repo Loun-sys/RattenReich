@@ -3602,6 +3602,57 @@ async def skill_roll_command(
     )
 
 
+@bot.tree.command(name="бросок", description="Бросить произвольное количество цветных кубов")
+@app_commands.describe(
+    желтые="Количество жёлтых кубов",
+    зеленые="Количество зелёных кубов",
+    негативные="Количество негативных кубов",
+)
+async def free_dice_roll_command(
+    interaction: discord.Interaction,
+    желтые: app_commands.Range[int, 0, 50] = 0,
+    зеленые: app_commands.Range[int, 0, 50] = 0,
+    негативные: app_commands.Range[int, 0, 50] = 0,
+):
+    if желтые + зеленые + негативные <= 0:
+        await interaction.response.send_message(
+            "Укажите хотя бы один куб для броска.", ephemeral=True,
+        )
+        return
+    yellow_rolls = d6(желтые)
+    green_rolls = d6(зеленые)
+    negative_rolls = d6(негативные)
+    positive_successes = sum(value == 6 for value in yellow_rolls + green_rolls)
+    negative_successes = sum(value == 6 for value in negative_rolls)
+    embed = discord.Embed(title="Свободный бросок", color=0x6E654F)
+
+    def add_dice_fields(label: str, values: list[int], color: str) -> None:
+        for offset in range(0, len(values), 25):
+            chunk = values[offset:offset + 25]
+            part = offset // 25 + 1
+            parts = (len(values) + 24) // 25
+            suffix = f" · часть {part}/{parts}" if parts > 1 else ""
+            embed.add_field(
+                name=f"{label} · {len(values)}{suffix}",
+                value=colored_dice(chunk, color),
+                inline=False,
+            )
+
+    add_dice_fields("Жёлтые", yellow_rolls, "attribute")
+    add_dice_fields("Зелёные", green_rolls, "skill")
+    add_dice_fields("Негативные", negative_rolls, "negative")
+    embed.add_field(
+        name="Итог",
+        value=(
+            f"Положительных успехов: **{positive_successes}** · "
+            f"негативных успехов: **{negative_successes}** · "
+            f"результат: **{positive_successes - negative_successes}**"
+        ),
+        inline=False,
+    )
+    embed.set_footer(text=f"Бросил: {interaction.user.display_name}")
+    await interaction.response.send_message(embed=embed)
+
 @skill_roll_command.autocomplete("навык")
 async def skill_roll_skill_autocomplete(interaction: discord.Interaction, current: str):
     character = await bot.db.character(interaction.guild_id, interaction.user.id)
