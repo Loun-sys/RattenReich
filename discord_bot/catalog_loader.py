@@ -17,6 +17,21 @@ REMOVED_SOURCE_NUMBERS = {55, 56, 58, 60}
 
 SUPPLY_LEVELS = ("I", "II", "III", "IV", "V")
 
+MEDICAL_CONSUMABLES = {
+    "Полевые бинты",
+    "Индивидуальный перевязочный пакет",
+    "Армейская аптечка",
+    "Набор полевого санитара",
+    "Нейростимулятор",
+    "Успокоительный автоинъектор",
+}
+
+
+def catalog_price_increase(price: int) -> int:
+    if price <= 0:
+        return 0
+    return 2 if price >= 10 else 1
+
 REDUCED_BASE_PRICES = {
     "Общедоступное": 4,
     "Снабжение I": 5,
@@ -153,6 +168,8 @@ def _balance_item(item: dict[str, Any]) -> dict[str, Any]:
         item["price"] = _weapon_price(item)
     elif category in {"Броня", "Щит"}:
         item["price"] = _protection_price(item)
+    if str(item.get("name") or "") not in MEDICAL_CONSUMABLES:
+        item["price"] = int(item.get("price") or 0) + catalog_price_increase(int(item.get("price") or 0))
     return item
 
 

@@ -8,7 +8,7 @@ from typing import Any
 
 import aiosqlite
 
-from catalog_loader import load_catalog
+from catalog_loader import MEDICAL_CONSUMABLES, catalog_price_increase, load_catalog
 from attachment_data import ATTACHMENT_BY_NAME, apply_attachments, compatible
 from constants import ATTRIBUTES, CLASSES, SKILLS
 from talent_data import TALENTS
@@ -315,6 +315,27 @@ class Database:
                 await db.execute(
                     "INSERT INTO app_migrations(key) VALUES(?)",
                     (medical_price_migration,),
+                )
+            equipment_price_migration = "equipment_prices_plus_1_2_2026_07_31"
+            equipment_prices_applied = await db.execute_fetchall(
+                "SELECT 1 FROM app_migrations WHERE key=?",
+                (equipment_price_migration,),
+            )
+            if not equipment_prices_applied:
+                overrides = await db.execute_fetchall(
+                    "SELECT name,price FROM item_price_overrides WHERE price>0"
+                )
+                for override in overrides:
+                    if override["name"] in MEDICAL_CONSUMABLES:
+                        continue
+                    price = int(override["price"])
+                    await db.execute(
+                        "UPDATE item_price_overrides SET price=? WHERE name=?",
+                        (price + catalog_price_increase(price), override["name"]),
+                    )
+                await db.execute(
+                    "INSERT INTO app_migrations(key) VALUES(?)",
+                    (equipment_price_migration,),
                 )
             await db.commit()
         await self.reload_base_catalog()
