@@ -129,6 +129,10 @@ CREATE TABLE IF NOT EXISTS supply_warehouse (
     deposited_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 CREATE INDEX IF NOT EXISTS idx_supply_warehouse_guild ON supply_warehouse(guild_id);
+CREATE TABLE IF NOT EXISTS app_migrations (
+    key TEXT PRIMARY KEY,
+    applied_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
 CREATE TABLE IF NOT EXISTS inventory (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     character_id INTEGER NOT NULL REFERENCES characters(id) ON DELETE CASCADE,
@@ -287,6 +291,30 @@ class Database:
                 await db.execute(
                     "UPDATE talents SET description=? WHERE lower(name)=lower(?)",
                     (talent["description"], talent["name"]),
+                )
+            medical_price_migration = "medical_consumable_prices_2026_07_31"
+            applied = await db.execute_fetchall(
+                "SELECT 1 FROM app_migrations WHERE key=?",
+                (medical_price_migration,),
+            )
+            if not applied:
+                medical_prices = {
+                    "Полевые бинты": 4,
+                    "Индивидуальный перевязочный пакет": 6,
+                    "Армейская аптечка": 8,
+                    "Набор полевого санитара": 12,
+                    "Нейростимулятор": 8,
+                    "Успокоительный автоинъектор": 8,
+                }
+                for item_name, price in medical_prices.items():
+                    await db.execute(
+                        """INSERT INTO item_price_overrides(name,price) VALUES(?,?)
+                           ON CONFLICT(name) DO UPDATE SET price=excluded.price""",
+                        (item_name, price),
+                    )
+                await db.execute(
+                    "INSERT INTO app_migrations(key) VALUES(?)",
+                    (medical_price_migration,),
                 )
             await db.commit()
         await self.reload_base_catalog()
