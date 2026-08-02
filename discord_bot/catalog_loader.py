@@ -349,6 +349,11 @@ def load_catalog(path: Path) -> list[dict[str, Any]]:
             gear = _integer(row.get(":gears:", ""), 1)
             damage = _integer(row.get(":damage:", ""), 0)
             properties = row.get("Свойства") or row.get("Свойство") or ""
+            properties = ", ".join(
+                value.strip()
+                for value in properties.split(",")
+                if value.strip().casefold() != "простое"
+            )
             effect = row.get("Игровой эффект") or row.get("Эффект") or ""
             expanded_effect = glossary.get(effect.rstrip("."), effect)
             defense = _integer(row.get("Защита", ""), 0)
