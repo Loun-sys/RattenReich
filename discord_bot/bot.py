@@ -512,6 +512,12 @@ def d6(count: int) -> list[int]:
     return [secrets.randbelow(6) + 1 for _ in range(max(0, count))]
 
 
+def attack_damage(successes: int, base_damage: int, modifier: int = 0) -> int:
+    successes = max(0, int(successes))
+    if successes == 0:
+        return 0
+    return max(0, int(base_damage) + successes - 1 + int(modifier))
+
 def d6_with_luck(count: int, luck_percent: int = 0) -> list[int]:
     """Secretly shift the chance of rolling a six by percentage points."""
     chance = max(0, min(10_000, 1667 + int(luck_percent) * 100))
@@ -2603,8 +2609,8 @@ class AttackView(discord.ui.View):
                 inline=True,
             )
             embed.add_field(name="Условия оружия", value=short(self.weapon["conditions"]), inline=False)
-        damage_factor = max(1, int(self.weapon["damage"])) if self.weapon else 1
-        damage_before_defense = max(0, self.attack_successes * damage_factor + self.damage_modifier)
+        base_damage = max(1, int(self.weapon["damage"])) if self.weapon else 1
+        damage_before_defense = attack_damage(self.attack_successes, base_damage, self.damage_modifier)
         modifier_text = (
             f' · модификатор урона: **{self.damage_modifier:+d}**'
             if self.damage_modifier else ""
@@ -2633,8 +2639,8 @@ class AttackView(discord.ui.View):
             return
         self.resolved = True
         net = max(0, self.attack_successes - defense_successes)
-        damage_factor = max(1, int(self.weapon["damage"])) if self.weapon else 1
-        raw_damage = max(0, net * damage_factor + self.damage_modifier)
+        base_damage = max(1, int(self.weapon["damage"])) if self.weapon else 1
+        raw_damage = attack_damage(net, base_damage, self.damage_modifier)
         target = await bot.db.character(interaction.guild_id, self.target_id)
         lines = [f"Атака: **{self.attack_successes}**", f"Защита: **{defense_successes}**"]
         target_items = {row["id"]: row for row in await bot.db.inventory(target["id"])}
@@ -3714,8 +3720,8 @@ class NPCTargetAttackView(AttackView):
         indestructible_dice = d6(int(npc["indestructible_defense"]))
         defense_successes = sum(value == 6 for value in armor_dice + shield_dice + indestructible_dice)
         net = max(0, self.attack_successes - defense_successes)
-        damage_factor = max(1, int(self.weapon["damage"])) if self.weapon else 1
-        raw_damage = max(0, net * damage_factor + self.damage_modifier)
+        base_damage = max(1, int(self.weapon["damage"])) if self.weapon else 1
+        raw_damage = attack_damage(net, base_damage, self.damage_modifier)
         damage_type = str(self.weapon.get("damage_type") or "") if self.weapon else ""
         reductions = json.loads(npc.get("damage_reductions") or "{}")
         reduction = max(0, int(reductions.get(damage_type, 0)))
@@ -4298,7 +4304,7 @@ async def use_consumable_command(
     if is_explosive:
         rolls = d6(int(item.get("gear") or item.get("durability") or 1))
         successes = sum(value == 6 for value in rolls)
-        damage = successes * max(0, int(item.get("damage") or 0))
+        damage = attack_damage(successes, max(0, int(item.get("damage") or 0)))
         lines.extend((
             f'Кубы взрыва: {colored_dice(rolls, "gear")}',
             f'Успехов: **{successes}**',
