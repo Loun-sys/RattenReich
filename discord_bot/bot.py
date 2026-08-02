@@ -3847,14 +3847,14 @@ async def send_attack(
     pools = []
     for shot_index in range(shots):
         pool = make_pool(
-            attacker, skill, bonus - penalty + auto_modifier + distance_modifier - shot_index, gear,
+            attacker, skill, bonus - penalty + auto_modifier + distance_modifier - (shot_index * 4), gear,
             success_modifier=success_modifier,
             attribute_override=attribute_override,
         )
         if weapon and int(weapon.get("attachment_skill_bonus") or 0):
             pool.skill_modifier_details.append(("Насадки", int(weapon["attachment_skill_bonus"])))
         if shot_index:
-            pool.skill_modifier_details.append((f"\u041f\u043e\u0441\u043b\u0435\u0434\u0443\u044e\u0449\u0438\u0439 \u0432\u044b\u0441\u0442\u0440\u0435\u043b \u2116{shot_index + 1}", -shot_index))
+            pool.skill_modifier_details.append((f"\u041f\u043e\u0441\u043b\u0435\u0434\u0443\u044e\u0449\u0438\u0439 \u0432\u044b\u0441\u0442\u0440\u0435\u043b \u2116{shot_index + 1}", -(shot_index * 4)))
         pools.append(pool)
     if npc:
         npc_current = int(npc["physique"] if target_attribute == "Телосложение" else npc["agility"])
@@ -4464,14 +4464,14 @@ async def send_npc_attack(
     skill_value = int(npc["shooting_skill"] if ranged else npc["fight_skill"]) + bonus - penalty
     pools = []
     for attack_index in range(attacks):
-        adjusted_skill = skill_value - attack_index
+        adjusted_skill = skill_value - (attack_index * 4 if ranged else 0)
         pools.append(RollPool(
             attribute=attribute,
             skill=skill_name,
             attribute_dice=d6(attribute_value),
             skill_dice=d6(max(0, adjusted_skill)),
             negative_dice=d6(max(0, -adjusted_skill)),
-            skill_modifier_details=([(f"\u041f\u043e\u0441\u043b\u0435\u0434\u0443\u044e\u0449\u0438\u0439 \u0432\u044b\u0441\u0442\u0440\u0435\u043b \u2116{attack_index + 1}", -attack_index)] if ranged and attack_index else []),
+            skill_modifier_details=([(f"\u041f\u043e\u0441\u043b\u0435\u0434\u0443\u044e\u0449\u0438\u0439 \u0432\u044b\u0441\u0442\u0440\u0435\u043b \u2116{attack_index + 1}", -(attack_index * 4))] if ranged and attack_index else []),
         ))
     damage = int(npc["ranged_damage"] if ranged else npc["melee_damage"])
     weapon = {
