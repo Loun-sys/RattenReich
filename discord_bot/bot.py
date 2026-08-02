@@ -1547,7 +1547,6 @@ STORE_SORT_LABELS = {
 STORE_FILTER_LABELS = {
     "size_small": "малые",
     "size_large": "большие",
-    "size_trinket": "безделушки",
     "consumable": "расходники",
     "permanent": "нерасходуемые",
     "access_public": "общедоступные",
@@ -1581,6 +1580,7 @@ def can_purchase(character: dict, item: dict, category: str | None = None) -> bo
     required = required_supply_level(item)
     return (
         store_category(item) != "Разное"
+        and str(item.get("size") or "") != "Безделушка"
         and int(item.get("price") or 0) > 0
         and required is not None
         and (required == 0 or character_supply_level(character) >= required)
@@ -1601,6 +1601,8 @@ def visible_store_items(character: dict, items: list[dict], category: str) -> li
     level = character_supply_level(character)
     visible = []
     for item in items:
+        if str(item.get("size") or "") == "Безделушка":
+            continue
         item_category = store_category(item)
         if category != "Все" and item_category != category:
             continue
@@ -1629,7 +1631,6 @@ def filter_store_items(
         value for key, value in (
             ("size_small", "Малый"),
             ("size_large", "Большой"),
-            ("size_trinket", "Безделушка"),
         )
         if key in filters
     }
@@ -1781,7 +1782,6 @@ class StoreFilterSelect(discord.ui.Select):
         options = [
             ("Малые предметы", "size_small", "Только предметы размера «Малый»"),
             ("Большие предметы", "size_large", "Только предметы размера «Большой»"),
-            ("Безделушки", "size_trinket", "Предметы без слотов"),
             ("Расходники", "consumable", "Одноразовые и многозарядные расходники"),
             ("Нерасходуемые", "permanent", "Постоянные предметы"),
             ("Общедоступные", "access_public", "Без требования навыка Снабжение"),
