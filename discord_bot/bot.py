@@ -154,87 +154,6 @@ def profile_embed(character: dict) -> discord.Embed:
     return embed
 
 
-def status_bar(current: int, maximum: int, length: int = 8) -> str:
-    maximum = max(1, int(maximum))
-    filled = max(0, min(length, round(length * int(current) / maximum)))
-    return "▰" * filled + "▱" * (length - filled)
-
-
-async def character_dashboard_embed(character: dict, include_card: bool = False) -> discord.Embed:
-    rank = RANKS[character["rank_index"]]
-    items = await bot.db.inventory(character["id"])
-    effects = await bot.db.active_effects(character["id"])
-    equipped = [item for item in items if item.get("equipped")]
-    injuries = character.get("injuries", [])
-    talents = character.get("talents", {})
-    class_skill = CLASSES.get(character["class_name"], "—")
-    icons = {"Телосложение": "🛡️", "Ловкость": "⚡", "Смекалка": "🧠", "Эмпатия": "🎭"}
-    stats = "\n".join(
-        f'{icons.get(name, "◆")} **{name}**  `{value["current"]}/{value["max"]}`  '
-        f'{status_bar(value["current"], value["max"], 6)}'
-        for name, value in character["attributes"].items()
-    )
-    equipment = "\n".join(f'• {item["name"]}' for item in equipped[:7]) or "_Ничего не экипировано_"
-    if len(equipped) > 7:
-        equipment += f'\n_…и ещё {len(equipped) - 7}_'
-    embed = discord.Embed(
-        title=f'⚔ {character["surname"]} {character["name"]}',
-        description=(
-            f'**{rank}**  ·  {character["race"]}  ·  **{character["class_name"]}**\n'
-            f'Классовый навык: **{class_skill}**'
-        ),
-        color=0x8C3B32 if injuries else 0x74603D,
-    )
-    embed.add_field(name="Характеристики", value=stats, inline=False)
-    embed.add_field(
-        name="Состояние",
-        value=(
-            f'❤️ **Воля** `{character["will_current"]}/{character["will_max"]}` '
-            f'{status_bar(character["will_current"], character["will_max"], 6)}\n'
-            f'☣️ **Заражение** `{character["infection"]}/5` '
-            f'{status_bar(character["infection"], 5, 6)}\n'
-            f'📜 **Бланки снабжения:** {character["supply_forms"]}'
-        ),
-        inline=True,
-    )
-    embed.add_field(name="Экипировано", value=short(equipment, 1024), inline=True)
-    embed.add_field(
-        name="Быстрая сводка",
-        value=(
-            f'🎒 Предметов: **{len(items)}**\n⭐ Талантов: **{len(talents)}**\n'
-            f'🩸 Травм: **{len(injuries)}**\n⏳ Эффектов: **{len(effects)}**'
-        ),
-        inline=True,
-    )
-    if not starting_skills_ready(character):
-        embed.add_field(
-            name="⚠ Персонаж не готов",
-            value="Завершите стартовое распределение навыков. Боевые броски пока заблокированы.",
-            inline=False,
-        )
-    embed.set_footer(text="Ratten Reich · полевой терминал · используйте кнопки ниже")
-    if include_card:
-        embed.set_image(url="attachment://личное-дело.png")
-    return embed
-
-
-def character_effects_embed(character: dict, effects: list[dict]) -> discord.Embed:
-    lines = []
-    for effect in effects:
-        expiry = effect.get("expires_at")
-        until = f' · до {expiry}' if expiry else ""
-        lines.append(
-            f'**{effect.get("name", "Эффект")}**{until}\n'
-            f'{effect.get("description") or "Без описания"}'
-        )
-    embed = discord.Embed(
-        title=f'Действующие эффекты · {character["surname"]} {character["name"]}',
-        description=short("\n────────────\n".join(lines) or "Активных временных эффектов нет.", 4000),
-        color=0x6B5C45,
-    )
-    embed.set_footer(text=f'Активных эффектов: {len(effects)}')
-    return embed
-
 def injuries_embed(character: dict, injuries: list[dict] | None = None) -> discord.Embed:
     injuries = character.get("injuries", []) if injuries is None else injuries
     lines = []
@@ -2386,113 +2305,82 @@ class CharacterPanel(discord.ui.View):
 
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
         if self.owner_id is not None and interaction.user.id != self.owner_id:
-            await interaction.response.send_message(
-                "Этой панелью может управлять только владелец персонажа.", ephemeral=True
-            )
+            await interaction.response.send_message("Этой панелью может управлять только владелец персонажа.", ephemeral=True)
             return False
         return True
 
-    @discord.ui.button(label="Досье", emoji="📄", style=discord.ButtonStyle.primary, custom_id="rr:card", row=0)
+    @discord.ui.button(label="Личное дело", style=discord.ButtonStyle.primary, custom_id="rr:card", row=0)
     async def card(self, interaction: discord.Interaction, _: discord.ui.Button):
         character = await get_character(interaction)
         if not character:
             return
-        await interaction.response.defer(thinking=True, ephemeral=True)
+        await interaction.response.defer(thinking=True)
         image = self.client.renderer.render(character)
-        await interaction.followup.send(
-            content="Полная карточка персонажа:",
-            file=discord.File(image, filename="личное-дело.png"),
-            ephemeral=True,
-        )
+        await interaction.followup.send(file=discord.File(image, filename="личное-дело.png"))
 
-    @discord.ui.button(label="Сводка", emoji="🔄", style=discord.ButtonStyle.secondary, custom_id="rr:overview", row=0)
-    async def overview(self, interaction: discord.Interaction, _: discord.ui.Button):
+    @discord.ui.button(label="Характеристики", style=discord.ButtonStyle.secondary, custom_id="rr:stats", row=1)
+    async def stats(self, interaction: discord.Interaction, _: discord.ui.Button):
         character = await get_character(interaction)
         if character:
-            await interaction.response.send_message(
-                embed=await character_dashboard_embed(character), ephemeral=True
-            )
+            await interaction.response.send_modal(StatsModal(character))
 
-    @discord.ui.button(label="ФИО", emoji="✏️", style=discord.ButtonStyle.secondary, custom_id="rr:identity", row=0)
-    async def identity(self, interaction: discord.Interaction, _: discord.ui.Button):
-        character = await get_character(interaction)
-        if character:
-            await interaction.response.send_modal(IdentityModal(character))
-
-    @discord.ui.button(label="Портрет", emoji="🖼️", style=discord.ButtonStyle.secondary, custom_id="rr:photo_url", row=0)
+    @discord.ui.button(label="Сменить портрет", style=discord.ButtonStyle.secondary, custom_id="rr:photo_url", row=0)
     async def photo_url(self, interaction: discord.Interaction, _: discord.ui.Button):
         character = await get_character(interaction)
         if character:
             await interaction.response.send_modal(PhotoUrlModal(character))
 
-    @discord.ui.button(label="Инвентарь", emoji="🎒", style=discord.ButtonStyle.secondary, custom_id="rr:inventory", row=1)
+    @discord.ui.button(label="ФИО", style=discord.ButtonStyle.secondary, custom_id="rr:identity", row=0)
+    async def identity(self, interaction: discord.Interaction, _: discord.ui.Button):
+        character = await get_character(interaction)
+        if character:
+            await interaction.response.send_modal(IdentityModal(character))
+
+    @discord.ui.button(label="Навыки", style=discord.ButtonStyle.secondary, custom_id="rr:skills", row=1)
+    async def skills(self, interaction: discord.Interaction, _: discord.ui.Button):
+        character = await get_character(interaction)
+        if character:
+            embed = discord.Embed(title="Раздел навыков", description="Выберите связанную характеристику или откройте классовый навык.", color=0x6E654F)
+            await interaction.response.send_message(embed=embed, view=SkillCategoriesView(character), ephemeral=True)
+
+    @discord.ui.button(label="Инвентарь", style=discord.ButtonStyle.secondary, custom_id="rr:inventory", row=1)
     async def inventory(self, interaction: discord.Interaction, _: discord.ui.Button):
         character = await get_character(interaction)
         if not character:
             return
+        embed = await build_inventory_embed(character)
         items = await bot.db.inventory(character["id"])
         await interaction.response.send_message(
-            embed=await build_inventory_embed(character),
+            embed=embed,
             view=InventoryActionsView(character, items),
             ephemeral=True,
         )
 
-    @discord.ui.button(label="Навыки", emoji="📊", style=discord.ButtonStyle.secondary, custom_id="rr:skills", row=1)
-    async def skills(self, interaction: discord.Interaction, _: discord.ui.Button):
-        character = await get_character(interaction)
-        if character:
-            embed = discord.Embed(
-                title="Навыки персонажа",
-                description="Выберите связанную характеристику или откройте классовый навык.",
-                color=0x6E654F,
-            )
-            await interaction.response.send_message(
-                embed=embed, view=SkillCategoriesView(character), ephemeral=True
-            )
-
-    @discord.ui.button(label="Таланты", emoji="⭐", style=discord.ButtonStyle.secondary, custom_id="rr:talents", row=1)
+    @discord.ui.button(label="Таланты", style=discord.ButtonStyle.secondary, custom_id="rr:talents", row=2)
     async def talents(self, interaction: discord.Interaction, _: discord.ui.Button):
         character = await get_character(interaction)
-        if character:
-            await interaction.response.send_message(
-                embed=build_talent_embed(character, "Мои", 0),
-                view=TalentView(character, "Мои"),
-                ephemeral=True,
-            )
+        if not character:
+            return
+        await interaction.response.send_message(
+            embed=build_talent_embed(character, "Доступные", 0),
+            view=TalentView(character),
+            ephemeral=True,
+        )
 
-    @discord.ui.button(label="Травмы", emoji="🩸", style=discord.ButtonStyle.secondary, custom_id="rr:injuries", row=1)
+    @discord.ui.button(label="Травмы", style=discord.ButtonStyle.secondary, custom_id="rr:injuries", row=2)
     async def injuries(self, interaction: discord.Interaction, _: discord.ui.Button):
         character = await get_character(interaction)
         if character:
-            await interaction.response.send_message(
-                embed=injuries_embed(character), ephemeral=True
-            )
+            await interaction.response.send_message(embed=injuries_embed(character))
 
-    @discord.ui.button(label="Магазин", emoji="🛒", style=discord.ButtonStyle.success, custom_id="rr:store", row=2)
-    async def store(self, interaction: discord.Interaction, _: discord.ui.Button):
+    @discord.ui.button(label="Заметки", style=discord.ButtonStyle.secondary, custom_id="rr:notes", row=2)
+    async def notes(self, interaction: discord.Interaction, _: discord.ui.Button):
         character = await get_character(interaction)
-        if not character:
-            return
-        items = await bot.db.catalog_items(interaction.guild_id, "", 500)
-        await interaction.response.send_message(
-            embed=build_store_embed(character, items, "Снаряжение", 0),
-            view=StoreView(character, items),
-            ephemeral=True,
-        )
+        if character:
+            await interaction.response.send_modal(NotesModal(character))
 
-    @discord.ui.button(label="Склад", emoji="📦", style=discord.ButtonStyle.primary, custom_id="rr:warehouse", row=2)
-    async def warehouse(self, interaction: discord.Interaction, _: discord.ui.Button):
-        character = await get_character(interaction)
-        if not character:
-            return
-        items = await bot.db.supply_warehouse_items(interaction.guild_id)
-        await interaction.response.send_message(
-            embed=build_warehouse_embed(items, "warehouse", 0),
-            view=SupplyWarehouseView(character, items),
-            ephemeral=True,
-        )
 
-    @discord.ui.button(label="Оружие", emoji="🔧", style=discord.ButtonStyle.secondary, custom_id="rr:weapon_mods", row=2)
+    @discord.ui.button(label="Модифицировать оружие", style=discord.ButtonStyle.primary, custom_id="rr:weapon_mods", row=3)
     async def weapon_mods(self, interaction: discord.Interaction, _: discord.ui.Button):
         character = await get_character(interaction)
         if not character:
@@ -2504,27 +2392,6 @@ class CharacterPanel(discord.ui.View):
             view=WeaponModificationView(character, items, installed),
             ephemeral=True,
         )
-
-    @discord.ui.button(label="Эффекты", emoji="⏳", style=discord.ButtonStyle.secondary, custom_id="rr:effects", row=2)
-    async def effects(self, interaction: discord.Interaction, _: discord.ui.Button):
-        character = await get_character(interaction)
-        if character:
-            effects = await bot.db.active_effects(character["id"])
-            await interaction.response.send_message(
-                embed=character_effects_embed(character, effects), ephemeral=True
-            )
-
-    @discord.ui.button(label="Характеристики", emoji="⚙️", style=discord.ButtonStyle.secondary, custom_id="rr:stats", row=3)
-    async def stats(self, interaction: discord.Interaction, _: discord.ui.Button):
-        character = await get_character(interaction)
-        if character:
-            await interaction.response.send_modal(StatsModal(character))
-
-    @discord.ui.button(label="Заметки", emoji="📝", style=discord.ButtonStyle.secondary, custom_id="rr:notes", row=3)
-    async def notes(self, interaction: discord.Interaction, _: discord.ui.Button):
-        character = await get_character(interaction)
-        if character:
-            await interaction.response.send_modal(NotesModal(character))
 
 async def apply_push_cost(pool: RollPool, character: dict) -> list[str]:
     messages: list[str] = []
@@ -3011,7 +2878,6 @@ async def character_panel(interaction: discord.Interaction, участник: di
     await interaction.response.defer(thinking=True)
     image = bot.renderer.render(character)
     await interaction.followup.send(
-        embed=await character_dashboard_embed(character, include_card=True),
         file=discord.File(image, filename="личное-дело.png"),
         view=CharacterPanel(bot, owner_id=owner.id),
     )
