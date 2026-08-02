@@ -175,6 +175,22 @@ def _protection_price(item: dict[str, Any]) -> int:
     return max(3, base + max(-2, min(4, adjustment)))
 
 
+_ACCESS_TEXT_RE = re.compile(
+    "(?P<label>\\u0434\\u043e\\u043f\\u0443\\u0441\\u043a\\s*:\\s*)(?:\\u043e\\u0431\\u0449\\u0435\\u0434\\u043e\\u0441\\u0442\\u0443\\u043f\\u043d\\u043e\\u0435|\\u043d\\u0435 \\u043f\\u0440\\u043e\\u0434\\u0430[\\u0435\\u0451]\\u0442\\u0441\\u044f|\\u0441\\u043d\\u0430\\u0431\\u0436\\u0435\\u043d\\u0438\\u0435\\s+(?:III|IV|II|V|I))",
+    re.IGNORECASE,
+)
+
+
+def _synchronize_access_text(item: dict[str, Any]) -> None:
+    access = str(item.get("access") or "\u041e\u0431\u0449\u0435\u0434\u043e\u0441\u0442\u0443\u043f\u043d\u043e\u0435")
+    for key in ("description", "conditions", "properties"):
+        value = str(item.get(key) or "")
+        if value:
+            item[key] = _ACCESS_TEXT_RE.sub(
+                lambda match: f'{match.group("label")}{access}',
+                value,
+            )
+
 def _balance_item(item: dict[str, Any]) -> dict[str, Any]:
     category = str(item.get("category") or "")
     uses = MULTI_USE_CONSUMABLES.get(str(item.get("name") or ""))
@@ -203,6 +219,7 @@ def _balance_item(item: dict[str, Any]) -> dict[str, Any]:
         item["price"] = _protection_price(item)
     if str(item.get("name") or "") not in MEDICAL_CONSUMABLES:
         item["price"] = int(item.get("price") or 0) + catalog_price_increase(int(item.get("price") or 0))
+    _synchronize_access_text(item)
     return item
 
 
