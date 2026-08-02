@@ -1525,14 +1525,38 @@ class AdminInventoryActionsView(discord.ui.View):
 
 
 STORE_CATEGORIES = (
+    "Все",
     "Снаряжение",
     "Оружие дальнего боя",
     "Оружие ближнего боя",
     "Броня",
+    "Насадка",
     "Разное",
 )
 STORE_PAGE_SIZE = 5
 ROMAN_LEVELS = {"I": 1, "II": 2, "III": 3, "IV": 4, "V": 5}
+STORE_SORT_LABELS = {
+    "name": "по названию",
+    "price_asc": "сначала дешёвые",
+    "price_desc": "сначала дорогие",
+    "access": "по возрастанию допуска",
+    "damage": "по урону",
+    "quality": "по качеству",
+    "fire_rate": "по скорострельности",
+}
+STORE_FILTER_LABELS = {
+    "size_small": "малые",
+    "size_large": "большие",
+    "size_trinket": "безделушки",
+    "consumable": "расходники",
+    "permanent": "нерасходуемые",
+    "access_public": "общедоступные",
+    "access_1": "допуск I",
+    "access_2": "допуск II",
+    "access_3": "допуск III",
+    "access_4": "допуск IV",
+    "access_5": "допуск V",
+}
 
 
 def store_category(item: dict) -> str:
@@ -1543,7 +1567,7 @@ def required_supply_level(item: dict) -> int | None:
     access = str(item.get("access") or "")
     if access.casefold() == "общедоступное":
         return 0
-    match = re.search(r"Снабжение\s+(I{1,3}|IV|V)\b", access, re.IGNORECASE)
+    match = re.search(r"Снабжениеs+(I{1,3}|IV|V)", access, re.IGNORECASE)
     return ROMAN_LEVELS.get(match.group(1).upper()) if match else None
 
 
@@ -1553,10 +1577,10 @@ def character_supply_level(character: dict) -> int:
     return int(character.get("skills", {}).get("Снабжение", -99))
 
 
-def can_purchase(character: dict, item: dict, category: str) -> bool:
+def can_purchase(character: dict, item: dict, category: str | None = None) -> bool:
     required = required_supply_level(item)
     return (
-        category != "Разное"
+        store_category(item) != "Разное"
         and int(item.get("price") or 0) > 0
         and required is not None
         and (required == 0 or character_supply_level(character) >= required)
@@ -1567,7 +1591,7 @@ def store_price(character: dict, item: dict) -> int:
     price = int(item.get("price") or 0)
     if price <= 0:
         return price
-    discount = 1 if "\u0411\u044e\u0440\u043e\u043a\u0440\u0430\u0442\u0438\u044f" in character.get("talents", {}) else 0
+    discount = 1 if "Бюрократия" in character.get("talents", {}) else 0
     if character_supply_level(character) > 6:
         discount += 1
     return max(1, price - discount)
@@ -1577,9 +1601,10 @@ def visible_store_items(character: dict, items: list[dict], category: str) -> li
     level = character_supply_level(character)
     visible = []
     for item in items:
-        if store_category(item) != category:
+        item_category = store_category(item)
+        if category != "Все" and item_category != category:
             continue
-        if category == "Разное":
+        if item_category == "Разное":
             visible.append(item)
             continue
         required = required_supply_level(item)
@@ -1589,32 +1614,99 @@ def visible_store_items(character: dict, items: list[dict], category: str) -> li
 
 
 def visible_purchasable_items(character: dict, items: list[dict]) -> list[dict]:
-    return [
-        item
-        for item in items
-        if can_purchase(character, item, store_category(item))
-    ]
+    return [item for item in items if can_purchase(character, item)]
 
 
-def store_page_items(character: dict, items: list[dict], category: str, page: int) -> tuple[list[dict], int, int]:
+def filter_store_items(
+    character: dict,
+    items: list[dict],
+    category: str,
+    filters: frozenset[str],
+    sort_mode: str,
+) -> list[dict]:
     filtered = visible_store_items(character, items, category)
+    sizes = {
+        value for key, value in (
+            ("size_small", "Малый"),
+            ("size_large", "Большой"),
+            ("size_trinket", "Безделушка"),
+        )
+        if key in filters
+    }
+    if sizes:
+        filtered = [item for item in filtered if str(item.get("size") or "") in sizes]
+
+    wants_consumable = "consumable" in filters
+    wants_permanent = "permanent" in filters
+    if wants_consumable != wants_permanent:
+        filtered = [
+            item for item in filtered
+            if is_consumable_item(item) == wants_consumable
+        ]
+
+    access_levels = {
+        level for level in range(6)
+        if ("access_public" if level == 0 else f"access_{level}") in filters
+    }
+    if access_levels:
+        filtered = [
+            item for item in filtered
+            if required_supply_level(item) in access_levels
+        ]
+
+    sorters = {
+        "name": lambda item: (str(item["name"]).casefold(),),
+        "price_asc": lambda item: (store_price(character, item), str(item["name"]).casefold()),
+        "price_desc": lambda item: (-store_price(character, item), str(item["name"]).casefold()),
+        "access": lambda item: (
+            required_supply_level(item) if required_supply_level(item) is not None else 99,
+            store_price(character, item),
+            str(item["name"]).casefold(),
+        ),
+        "damage": lambda item: (-int(item.get("damage") or 0), str(item["name"]).casefold()),
+        "quality": lambda item: (
+            -int(item.get("max_durability") or item.get("gear") or 0),
+            str(item["name"]).casefold(),
+        ),
+        "fire_rate": lambda item: (-int(item.get("fire_rate") or 0), str(item["name"]).casefold()),
+    }
+    filtered.sort(key=sorters.get(sort_mode, sorters["name"]))
+    return filtered
+
+
+def store_page_items(
+    character: dict,
+    items: list[dict],
+    category: str,
+    page: int,
+    filters: frozenset[str] = frozenset(),
+    sort_mode: str = "name",
+) -> tuple[list[dict], int, int, int]:
+    filtered = filter_store_items(character, items, category, filters, sort_mode)
     pages = max(1, (len(filtered) + STORE_PAGE_SIZE - 1) // STORE_PAGE_SIZE)
     page = max(0, min(page, pages - 1))
     start = page * STORE_PAGE_SIZE
-    return filtered[start:start + STORE_PAGE_SIZE], page, pages
+    return filtered[start:start + STORE_PAGE_SIZE], page, pages, len(filtered)
 
 
-def build_store_embed(character: dict, items: list[dict], category: str, page: int) -> discord.Embed:
-    visible, page, pages = store_page_items(character, items, category, page)
+def build_store_embed(
+    character: dict,
+    items: list[dict],
+    category: str,
+    page: int,
+    filters: frozenset[str] = frozenset(),
+    sort_mode: str = "name",
+) -> discord.Embed:
+    visible, page, pages, total = store_page_items(
+        character, items, category, page, filters, sort_mode
+    )
     lines = []
     for item in visible:
         required = required_supply_level(item)
-        if category == "Разное":
+        if store_category(item) == "Разное":
             status = "только просмотр"
         elif required is None:
             status = "не продаётся"
-        elif required and character_supply_level(character) < required:
-            status = f'требуется Снабжение {required}'
         else:
             status = "доступно"
         effective_price = store_price(character, item)
@@ -1632,12 +1724,26 @@ def build_store_embed(character: dict, items: list[dict], category: str, page: i
         )
     embed = discord.Embed(
         title=f"Магазин снабжения · {category}",
-        description=short("\n────────────\n".join(lines) or "В этой категории пока пусто.", 4000),
+        description=short("\n────────────\n".join(lines) or "По выбранным фильтрам ничего не найдено.", 4000),
         color=0x745B38,
     )
     supply_skill = (
         f'{character["skills"].get("Снабжение", -3):+d}'
         if character["class_name"] == "Снабженец" else "нет"
+    )
+    active_filters = ", ".join(
+        STORE_FILTER_LABELS[value]
+        for value in STORE_FILTER_LABELS
+        if value in filters
+    )
+    embed.add_field(
+        name="Фильтры",
+        value=(
+            f'**{active_filters or "не выбраны"}**\n'
+            f'Сортировка: **{STORE_SORT_LABELS.get(sort_mode, STORE_SORT_LABELS["name"])}** · '
+            f'найдено: **{total}**'
+        ),
+        inline=False,
     )
     embed.add_field(
         name="Лицевой счёт",
@@ -1646,6 +1752,89 @@ def build_store_embed(character: dict, items: list[dict], category: str, page: i
     )
     embed.set_footer(text=f"Страница {page + 1}/{pages} · выберите предмет в списке")
     return embed
+
+class StoreCategorySelect(discord.ui.Select):
+    def __init__(self, store_view: "StoreView"):
+        self.store_view = store_view
+        super().__init__(
+            placeholder="Категория товаров",
+            min_values=1,
+            max_values=1,
+            options=[
+                discord.SelectOption(
+                    label=category,
+                    value=category,
+                    default=category == store_view.category,
+                )
+                for category in STORE_CATEGORIES
+            ],
+            row=0,
+        )
+
+    async def callback(self, interaction: discord.Interaction):
+        await self.store_view.refresh(interaction, category=self.values[0], page=0)
+
+
+class StoreFilterSelect(discord.ui.Select):
+    def __init__(self, store_view: "StoreView"):
+        self.store_view = store_view
+        options = [
+            ("Малые предметы", "size_small", "Только предметы размера «Малый»"),
+            ("Большие предметы", "size_large", "Только предметы размера «Большой»"),
+            ("Безделушки", "size_trinket", "Предметы без слотов"),
+            ("Расходники", "consumable", "Одноразовые и многозарядные расходники"),
+            ("Нерасходуемые", "permanent", "Постоянные предметы"),
+            ("Общедоступные", "access_public", "Без требования навыка Снабжение"),
+            ("Допуск I", "access_1", "Требуется Снабжение I"),
+            ("Допуск II", "access_2", "Требуется Снабжение II"),
+            ("Допуск III", "access_3", "Требуется Снабжение III"),
+            ("Допуск IV", "access_4", "Требуется Снабжение IV"),
+            ("Допуск V", "access_5", "Требуется Снабжение V"),
+        ]
+        super().__init__(
+            placeholder="Фильтры: размер, тип и допуск",
+            min_values=0,
+            max_values=len(options),
+            options=[
+                discord.SelectOption(
+                    label=label,
+                    value=value,
+                    description=description,
+                    default=value in store_view.filters,
+                )
+                for label, value, description in options
+            ],
+            row=1,
+        )
+
+    async def callback(self, interaction: discord.Interaction):
+        await self.store_view.refresh(
+            interaction, filters=frozenset(self.values), page=0
+        )
+
+
+class StoreSortSelect(discord.ui.Select):
+    def __init__(self, store_view: "StoreView"):
+        self.store_view = store_view
+        super().__init__(
+            placeholder="Сортировка",
+            min_values=1,
+            max_values=1,
+            options=[
+                discord.SelectOption(
+                    label=label,
+                    value=value,
+                    default=value == store_view.sort_mode,
+                )
+                for value, label in STORE_SORT_LABELS.items()
+            ],
+            row=2,
+        )
+
+    async def callback(self, interaction: discord.Interaction):
+        await self.store_view.refresh(
+            interaction, sort_mode=self.values[0], page=0
+        )
 
 
 class StoreItemSelect(discord.ui.Select):
@@ -1660,116 +1849,143 @@ class StoreItemSelect(discord.ui.Select):
                     label=item["name"][:100],
                     value=str(item["id"]),
                     description=f'{store_price(store_view.character, item)} БС · {item["access"]}'[:100],
+                    default=int(item["id"]) == store_view.selected_id,
                 )
                 for item in items
             ],
-            row=0,
+            row=3,
         )
 
     async def callback(self, interaction: discord.Interaction):
-        self.store_view.selected_id = int(self.values[0])
-        item = self.store_view.items[self.store_view.selected_id]
-        if can_purchase(self.store_view.character, item, self.store_view.category):
-            if self.store_view.buy_button not in self.store_view.children:
-                self.store_view.add_item(self.store_view.buy_button)
-        elif self.store_view.buy_button in self.store_view.children:
-            self.store_view.remove_item(self.store_view.buy_button)
-        await interaction.response.edit_message(view=self.store_view)
+        selected_id = int(self.values[0])
+        await self.store_view.refresh(
+            interaction, selected_id=selected_id, page=self.store_view.page
+        )
 
 
 class StoreView(discord.ui.View):
-    def __init__(self, character: dict, items: list[dict], category: str = "Снаряжение", page: int = 0):
-        super().__init__(timeout=300)
+    def __init__(
+        self,
+        character: dict,
+        items: list[dict],
+        category: str = "Снаряжение",
+        page: int = 0,
+        filters: frozenset[str] = frozenset(),
+        sort_mode: str = "name",
+        selected_id: int | None = None,
+    ):
+        super().__init__(timeout=600)
         self.character = character
+        self.item_list = items
         self.items = {int(item["id"]): item for item in items}
-        self.category = category
-        self.selected_id: int | None = None
-        visible, self.page, self.page_count = store_page_items(character, items, category, page)
+        self.category = category if category in STORE_CATEGORIES else "Снаряжение"
+        self.filters = frozenset(filters)
+        self.sort_mode = sort_mode if sort_mode in STORE_SORT_LABELS else "name"
+        self.selected_id = selected_id
+        visible, self.page, self.page_count, _ = store_page_items(
+            character, items, self.category, page, self.filters, self.sort_mode
+        )
+        self.add_item(StoreCategorySelect(self))
+        self.add_item(StoreFilterSelect(self))
+        self.add_item(StoreSortSelect(self))
         if visible:
             self.add_item(StoreItemSelect(self, visible))
-        self.add_item(PageSelect(self, self.page, self.page_count, row=3))
-        self.first_page.disabled = self.page == 0
         self.previous_page.disabled = self.page == 0
+        self.page_indicator.label = f"{self.page + 1}/{self.page_count}"
+        self.page_indicator.disabled = True
         self.next_page.disabled = self.page >= self.page_count - 1
-        self.last_page.disabled = self.page >= self.page_count - 1
-        self.remove_item(self.buy_button)
+        selected = self.items.get(self.selected_id)
+        self.buy_button.disabled = not (
+            selected and can_purchase(self.character, selected)
+        )
 
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
         if interaction.user.id != self.character["user_id"]:
-            await interaction.response.send_message("Этим магазином может пользоваться только его владелец.", ephemeral=True)
+            await interaction.response.send_message(
+                "Этим магазином может пользоваться только его владелец.", ephemeral=True
+            )
             return False
         return True
 
-    async def refresh(self, interaction: discord.Interaction, category: str | None = None, page: int | None = None):
+    async def refresh(
+        self,
+        interaction: discord.Interaction,
+        category: str | None = None,
+        page: int | None = None,
+        filters: frozenset[str] | None = None,
+        sort_mode: str | None = None,
+        selected_id: int | None = None,
+    ):
         character = await bot.db.character(interaction.guild_id, self.character["user_id"])
         items = await bot.db.catalog_items(interaction.guild_id, "", 500)
-        category = category or self.category
+        category = self.category if category is None else category
         page = self.page if page is None else page
+        filters = self.filters if filters is None else filters
+        sort_mode = self.sort_mode if sort_mode is None else sort_mode
+        view = StoreView(
+            character, items, category, page, filters, sort_mode, selected_id
+        )
         await interaction.response.edit_message(
-            embed=build_store_embed(character, items, category, page),
-            view=StoreView(character, items, category, page),
+            embed=build_store_embed(
+                character, items, view.category, view.page, view.filters, view.sort_mode
+            ),
+            view=view,
         )
 
-    @discord.ui.button(label="Снаряжение", style=discord.ButtonStyle.secondary, row=1)
-    async def equipment(self, interaction: discord.Interaction, _: discord.ui.Button):
-        await self.refresh(interaction, "Снаряжение", 0)
-
-    @discord.ui.button(label="Дальний бой", style=discord.ButtonStyle.secondary, row=1)
-    async def ranged(self, interaction: discord.Interaction, _: discord.ui.Button):
-        await self.refresh(interaction, "Оружие дальнего боя", 0)
-
-    @discord.ui.button(label="Ближний бой", style=discord.ButtonStyle.secondary, row=1)
-    async def melee(self, interaction: discord.Interaction, _: discord.ui.Button):
-        await self.refresh(interaction, "Оружие ближнего боя", 0)
-
-    @discord.ui.button(label="Броня", style=discord.ButtonStyle.secondary, row=1)
-    async def armor(self, interaction: discord.Interaction, _: discord.ui.Button):
-        await self.refresh(interaction, "Броня", 0)
-
-    @discord.ui.button(label="Разное", style=discord.ButtonStyle.secondary, row=4)
-    async def misc(self, interaction: discord.Interaction, _: discord.ui.Button):
-        await self.refresh(interaction, "Разное", 0)
-
-    @discord.ui.button(label="Насадки", style=discord.ButtonStyle.primary, row=1)
-    async def attachments(self, interaction: discord.Interaction, _: discord.ui.Button):
-        await self.refresh(interaction, "Насадка", 0)
-
-    @discord.ui.button(label="←", style=discord.ButtonStyle.secondary, row=2)
+    @discord.ui.button(label="←", style=discord.ButtonStyle.secondary, row=4)
     async def previous_page(self, interaction: discord.Interaction, _: discord.ui.Button):
         await self.refresh(interaction, page=self.page - 1)
 
-    @discord.ui.button(label="→", style=discord.ButtonStyle.secondary, row=2)
+    @discord.ui.button(label="1/1", style=discord.ButtonStyle.secondary, row=4)
+    async def page_indicator(self, interaction: discord.Interaction, _: discord.ui.Button):
+        pass
+
+    @discord.ui.button(label="→", style=discord.ButtonStyle.secondary, row=4)
     async def next_page(self, interaction: discord.Interaction, _: discord.ui.Button):
         await self.refresh(interaction, page=self.page + 1)
 
-    @discord.ui.button(label="В начало", style=discord.ButtonStyle.secondary, row=2)
-    async def first_page(self, interaction: discord.Interaction, _: discord.ui.Button):
-        await self.refresh(interaction, page=0)
+    @discord.ui.button(label="Сбросить", style=discord.ButtonStyle.secondary, row=4)
+    async def reset_filters(self, interaction: discord.Interaction, _: discord.ui.Button):
+        await self.refresh(
+            interaction,
+            category="Снаряжение",
+            page=0,
+            filters=frozenset(),
+            sort_mode="name",
+        )
 
-    @discord.ui.button(label="В конец", style=discord.ButtonStyle.secondary, row=2)
-    async def last_page(self, interaction: discord.Interaction, _: discord.ui.Button):
-        await self.refresh(interaction, page=self.page_count - 1)
-
-    @discord.ui.button(label="Купить", style=discord.ButtonStyle.success, row=2)
+    @discord.ui.button(label="Купить", style=discord.ButtonStyle.success, row=4)
     async def buy_button(self, interaction: discord.Interaction, _: discord.ui.Button):
         item = self.items.get(self.selected_id)
-        if not item or not can_purchase(self.character, item, self.category):
+        if not item or not can_purchase(self.character, item):
             await interaction.response.send_message("Этот предмет вам недоступен.", ephemeral=True)
             return
         required = required_supply_level(item) or 0
-        success, message, _ = await bot.db.purchase_item(self.character["id"], item["id"], required)
+        success, message, _ = await bot.db.purchase_item(
+            self.character["id"], item["id"], required
+        )
         if not success:
             await interaction.response.send_message(message, ephemeral=True)
             return
         base_price = int(item.get("price") or 0)
         paid = store_price(self.character, item)
         discount = max(0, base_price - paid)
-        await self.refresh(interaction)
+        character = await bot.db.character(interaction.guild_id, self.character["user_id"])
+        items = await bot.db.catalog_items(interaction.guild_id, "", 500)
+        view = StoreView(
+            character, items, self.category, self.page, self.filters, self.sort_mode
+        )
+        await interaction.response.edit_message(
+            embed=build_store_embed(
+                character, items, view.category, view.page, view.filters, view.sort_mode
+            ),
+            view=view,
+        )
         await interaction.followup.send(
-            f'{interaction.user.mention} \u0437\u0430\u043a\u0430\u0437\u044b\u0432\u0430\u0435\u0442 **{item["name"]}** \u0437\u0430 **{paid} \u0411\u0421**. \u0421\u043a\u0438\u0434\u043a\u0430: **{discount} \u0411\u0421**. \u0417\u0430\u044f\u0432\u043a\u0430 \u043e\u0436\u0438\u0434\u0430\u0435\u0442 \u0440\u0435\u0448\u0435\u043d\u0438\u044f \u0441\u043d\u0430\u0431\u0436\u0435\u043d\u0438\u044f.',
+            f'{interaction.user.mention} заказывает **{item["name"]}** за **{paid} БС**. '
+            f'Скидка: **{discount} БС**. Заявка ожидает решения снабжения.',
             ephemeral=False,
         )
-
 
 SUPPLY_ORDER_PAGE_SIZE = 5
 
