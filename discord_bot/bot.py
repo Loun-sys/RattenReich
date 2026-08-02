@@ -20,7 +20,7 @@ from dotenv import load_dotenv
 
 from attachment_data import ATTACHMENT_BY_NAME, compatible
 from card_renderer import CardRenderer
-from catalog_loader import MULTI_USE_CONSUMABLES
+from catalog_loader import MULTI_USE_CONSUMABLES, is_consumable_item
 from constants import ATTRIBUTES, CLASSES, ITEM_CATEGORIES, ITEM_SIZES, RACES, RANGES, RANKS, SKILLS
 from database import Database
 from trauma_data import MENTAL_TRAUMAS, PHYSICAL_TRAUMAS, SOCIAL_TRAUMAS
@@ -4286,8 +4286,8 @@ async def use_consumable_command(
     if not character:
         await interaction.response.send_message("Сначала зарегистрируйте персонажа.", ephemeral=True)
         return
-    item = await bot.db.inventory_item_by_name(character["id"], предмет)
-    if not item or "расходник" not in str(item.get("properties") or "").casefold():
+    item = await bot.db.inventory_item_by_name(character["id"], предмет.strip())
+    if not item or not is_consumable_item(item):
         await interaction.response.send_message("Такого расходника нет в вашем инвентаре.", ephemeral=True)
         return
     text = str(item.get("conditions") or item.get("description") or "")
@@ -4396,8 +4396,8 @@ async def consumable_autocomplete(interaction: discord.Interaction, current: str
             value=item["name"],
         )
         for item in await bot.db.inventory(character["id"])
-        if "расходник" in str(item.get("properties") or "").casefold()
-        and current.casefold() in item["name"].casefold()
+        if is_consumable_item(item)
+        and current.casefold().strip() in item["name"].casefold()
     ][:25]
 
 
@@ -5023,7 +5023,7 @@ async def item_state(
     if not character:
         await interaction.response.send_message(f"У {участник.mention} нет зарегистрированного персонажа.", ephemeral=True)
         return
-    item = await bot.db.inventory_item_by_name(character["id"], предмет)
+    item = await bot.db.inventory_item_by_name(character["id"], предмет.strip())
     if not item:
         await interaction.response.send_message("Выбранный предмет не найден.", ephemeral=True)
         return

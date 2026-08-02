@@ -36,6 +36,23 @@ MULTI_USE_CONSUMABLES = {
     "Бренди «Кайзерблут»": 2,
 }
 
+_CONSUMABLE_NAMES = {name.casefold() for name in MEDICAL_CONSUMABLES | set(MULTI_USE_CONSUMABLES)}
+
+
+def is_consumable_item(item: dict[str, Any]) -> bool:
+    """Recognize current and legacy consumables even when their stored flag is missing."""
+    name = str(item.get("name") or "").strip().casefold()
+    if name in _CONSUMABLE_NAMES:
+        return True
+    text = " ".join(
+        str(item.get(key) or "") for key in ("properties", "conditions", "description")
+    ).casefold()
+    return (
+        "расходник" in text
+        or "одноразов" in text
+        or ("восстанавлива" in text and "пункт" in text)
+    )
+
 def catalog_price_increase(price: int) -> int:
     if price <= 0:
         return 0

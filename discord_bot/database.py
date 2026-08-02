@@ -8,7 +8,7 @@ from typing import Any
 
 import aiosqlite
 
-from catalog_loader import MEDICAL_CONSUMABLES, MULTI_USE_CONSUMABLES, catalog_price_increase, load_catalog
+from catalog_loader import MEDICAL_CONSUMABLES, MULTI_USE_CONSUMABLES, catalog_price_increase, is_consumable_item, load_catalog
 from attachment_data import ATTACHMENT_BY_NAME, apply_attachments, compatible
 from constants import ATTRIBUTES, CLASSES, SKILLS
 from talent_data import TALENTS
@@ -1088,7 +1088,7 @@ class Database:
 
     async def give_item(self, character_id: int, item: dict[str, Any], quantity: int = 1) -> int:
         async with self.connect() as db:
-            if "расходник" in str(item.get("properties") or "").casefold():
+            if is_consumable_item(item):
                 rows = await db.execute_fetchall(
                     """SELECT id FROM inventory
                        WHERE character_id=? AND item_id=? AND durability=? AND ammo IS ? AND equipped=0
@@ -1209,7 +1209,7 @@ class Database:
                     await db.rollback()
                     return False, "Предмет больше не существует в каталоге. Отклоните заявку для возврата БС.", order
                 item = dict(item_rows[0])
-                if "расходник" in str(item.get("properties") or "").casefold():
+                if is_consumable_item(item):
                     stacks = await db.execute_fetchall(
                         """SELECT id FROM supply_warehouse
                            WHERE guild_id=? AND item_id=? AND durability=? AND ammo IS ?
@@ -1297,7 +1297,7 @@ class Database:
                 if occupied >= capacity:
                     await db.rollback()
                     return False, f"Нет свободного слота: {occupied}/{capacity}."
-            consumable = "расходник" in str(item.get("properties") or "").casefold()
+            consumable = is_consumable_item(item)
             stacks = await db.execute_fetchall(
                 "SELECT id FROM inventory WHERE character_id=? AND item_id=? AND durability=? AND ammo IS ? AND equipped=0 ORDER BY id LIMIT 1",
                 (character_id, item["item_id"], item["durability"], item["ammo"]),
@@ -1342,7 +1342,7 @@ class Database:
             if links:
                 await db.rollback()
                 return False, "Сначала снимите все насадки с предмета или оружия."
-            consumable = "расходник" in str(item.get("properties") or "").casefold()
+            consumable = is_consumable_item(item)
             stacks = await db.execute_fetchall(
                 """SELECT id FROM supply_warehouse WHERE guild_id=? AND item_id=?
                    AND durability=? AND ammo IS ? ORDER BY id LIMIT 1""",
@@ -1509,7 +1509,7 @@ class Database:
                     await db.rollback()
                     return False, f"У получателя недостаточно слотов: {occupied}/{capacity}."
             remaining = quantity
-            stackable = "расходник" in str(item["properties"] or "").casefold()
+            stackable = is_consumable_item(item)
             for row in available:
                 if remaining <= 0:
                     break
@@ -1713,10 +1713,11 @@ class Database:
 
     async def inventory_item_by_name(self, character_id: int, name: str, equipped_only: bool = False) -> dict[str, Any] | None:
         items = await self.inventory(character_id)
+        normalized_name = name.strip().casefold()
         return next(
             (
                 item for item in items
-                if str(item["name"]).casefold() == name.casefold()
+                if str(item["name"]).strip().casefold() == normalized_name
                 and (not equipped_only or bool(item["equipped"]))
             ),
             None,
