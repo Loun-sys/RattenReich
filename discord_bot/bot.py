@@ -1118,7 +1118,10 @@ async def build_inventory_embed(
             if is_ammo_package:
                 details.append(f'патроны {item["ammo"]}/{item["ammo_max"]}')
             else:
+                ammo_type = weapon_ammo_code(item)
                 details.append(f'боезапас {item["ammo"]}/{item["ammo_max"]}')
+                if ammo_type:
+                    details.append(f'боеприпас {ammo_type}')
         if item["fire_rate"] and not is_ammo_package:
             details.append(f'СКР {item["fire_rate"]}')
         if item.get("attachments"):
