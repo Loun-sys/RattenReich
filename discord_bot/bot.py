@@ -391,6 +391,13 @@ def d6(count: int) -> list[int]:
     return [secrets.randbelow(6) + 1 for _ in range(max(0, count))]
 
 
+BURST_PENALTY_PER_FOLLOWUP_SHOT = 3
+
+
+def burst_shot_modifier(shot_index: int) -> int:
+    """Return the cumulative dice modifier for a zero-based shot index."""
+    return -(max(0, int(shot_index)) * BURST_PENALTY_PER_FOLLOWUP_SHOT)
+
 @dataclass
 class RollPool:
     attribute: str
@@ -2246,6 +2253,12 @@ class AttackView(discord.ui.View):
             parts.append(f'Успехов: **{pool.successes}**')
             value = "\n".join(parts)
             embed.add_field(name=f"Очередь {index}", value=value, inline=False)
+        if self.ranged and len(self.pools) > 1:
+            embed.add_field(
+                name="Штраф очереди",
+                value="Каждый последующий выстрел: **−3 куба** (накопительно: −3, −6, −9…).",
+                inline=False,
+            )
         if self.distance:
             embed.add_field(
                 name="Дистанция",
@@ -3291,15 +3304,24 @@ async def send_attack(
     success_modifier += active_success_modifier(active_effects, SKILL_ATTRIBUTES[skill])
     pools = []
     for shot_index in range(shots):
+        burst_modifier = burst_shot_modifier(shot_index)
+        attachment_modifier = int((weapon or {}).get("attachment_skill_bonus") or 0)
+        other_modifier = bonus - penalty + auto_modifier + distance_modifier - attachment_modifier
         pool = make_pool(
-            attacker, skill, bonus - penalty + auto_modifier + distance_modifier - shot_index, gear,
+            attacker, skill, other_modifier + attachment_modifier + burst_modifier, gear,
             success_modifier=success_modifier,
             attribute_override=attribute_override,
         )
-        if weapon and int(weapon.get("attachment_skill_bonus") or 0):
-            pool.skill_modifier_details.append(("Насадки", int(weapon["attachment_skill_bonus"])))
-        if shot_index:
-            pool.skill_modifier_details.append((f"\u041f\u043e\u0441\u043b\u0435\u0434\u0443\u044e\u0449\u0438\u0439 \u0432\u044b\u0441\u0442\u0440\u0435\u043b \u2116{shot_index + 1}", -shot_index))
+        pool.skill_modifier_details = [
+            detail for detail in pool.skill_modifier_details
+            if detail[0] != "Прочие модификаторы"
+        ]
+        if other_modifier:
+            pool.skill_modifier_details.append(("Остальные модификаторы", other_modifier))
+        if attachment_modifier:
+            pool.skill_modifier_details.append(("Насадки", attachment_modifier))
+        if burst_modifier:
+            pool.skill_modifier_details.append((f"Штраф очереди · выстрел №{shot_index + 1}", burst_modifier))
         pools.append(pool)
     if npc:
         npc_current = int(npc["physique"] if target_attribute == "Телосложение" else npc["agility"])
@@ -3910,14 +3932,15 @@ async def send_npc_attack(
     skill_value = int(npc["shooting_skill"] if ranged else npc["fight_skill"]) + bonus - penalty
     pools = []
     for attack_index in range(attacks):
-        adjusted_skill = skill_value - attack_index
+        burst_modifier = burst_shot_modifier(attack_index) if ranged else 0
+        adjusted_skill = skill_value + burst_modifier
         pools.append(RollPool(
             attribute=attribute,
             skill=skill_name,
             attribute_dice=d6(attribute_value),
             skill_dice=d6(max(0, adjusted_skill)),
             negative_dice=d6(max(0, -adjusted_skill)),
-            skill_modifier_details=([(f"\u041f\u043e\u0441\u043b\u0435\u0434\u0443\u044e\u0449\u0438\u0439 \u0432\u044b\u0441\u0442\u0440\u0435\u043b \u2116{attack_index + 1}", -attack_index)] if ranged and attack_index else []),
+            skill_modifier_details=([(f"Штраф очереди · выстрел №{attack_index + 1}", burst_modifier)] if burst_modifier else []),
         ))
     damage = int(npc["ranged_damage"] if ranged else npc["melee_damage"])
     weapon = {
