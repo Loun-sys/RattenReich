@@ -284,7 +284,9 @@ class Database:
         await self.migrate_ammo_packages()
         await self.repair_ammo_package_contents()
         await self.merge_stackable_inventory()
-     async def repair_ammo_package_contents(self) -> int:
+        await self.split_nonstackable_inventory()
+
+    async def repair_ammo_package_contents(self) -> int:
         """Одноразово наполняет упаковки, созданные из старых комплектов."""
         repaired = 0
         async with self.connect() as db:
@@ -323,8 +325,6 @@ class Database:
             )
             await db.commit()
         return repaired
-
-       await self.split_nonstackable_inventory()
 
     async def migrate_ammo_packages(self) -> int:
         """Переносит старые комплекты/единицы в отдельные средние упаковки."""
