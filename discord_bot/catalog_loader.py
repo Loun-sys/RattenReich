@@ -203,7 +203,15 @@ def _apply_summary_overrides(items: list[dict[str, Any]], source_path: Path) -> 
             continue
         override = overrides.get(number)
         if override:
+            original_conditions = str(item.get("conditions") or "")
             item.update({key: value for key, value in override.items() if value not in ("", None)})
+            preserved = []
+            for label in ("Боеприпас", "Совместимо", "Допуск"):
+                match = re.search(rf"(?:^|;\s*)({label}:\s*[^;]+)", original_conditions, re.IGNORECASE)
+                if match and not re.search(rf"(?:^|;\s*){label}:", str(item.get("conditions") or ""), re.IGNORECASE):
+                    preserved.append(match.group(1).strip())
+            if preserved:
+                item["conditions"] = "; ".join(part for part in (str(item.get("conditions") or "").strip(), *preserved) if part)
             item["description"] = item["conditions"]
             if item["category"] == "Броня":
                 item["max_durability"] = max(1, int(item.get("defense") or 0))
