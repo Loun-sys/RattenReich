@@ -559,6 +559,40 @@ def ammo_code(conditions: str) -> str:
     return next((code for name, code in AMMO_CODES.items() if name in folded), ammo[:3].upper())
 
 
+WEAPON_AMMO_BY_SOURCE = {
+    11: "П", 12: "П", 13: "СР", 14: "П", 15: "П",
+    16: "В", 17: "В", 18: "В", 19: "В", 20: "В",
+    128: "П", 129: "П", 130: "П", 131: "П",
+    132: "Д", 133: "Д", 134: "Д",
+    135: "В", 136: "В", 137: "В", 138: "В",
+    139: "Г", 140: "И", 243: "О", 244: "О",
+    250: "П", 251: "В",
+}
+
+
+def weapon_ammo_code(weapon) -> str:
+    code = ammo_code(str(weapon.get("conditions") or ""))
+    if code in AMMO_PACKAGES:
+        return code
+    try:
+        source_number = int(weapon.get("source_number") or 0)
+    except (TypeError, ValueError):
+        source_number = 0
+    if source_number in WEAPON_AMMO_BY_SOURCE:
+        return WEAPON_AMMO_BY_SOURCE[source_number]
+    text = " ".join(str(weapon.get(key) or "") for key in ("name", "description", "properties")).casefold()
+    name_rules = (
+        (("огнемёт", "огнемет"), "О"),
+        (("гарпун",), "Г"),
+        (("игольн", "игломёт", "игломет"), "И"),
+        (("сигнальн",), "СР"),
+        (("дробов", "дробовик", "обрез", "двустволь", "помпов", "охотничьего ружья"), "Д"),
+        (("пистолет", "револьвер"), "П"),
+        (("винтов", "карабин", "мушкет", "пулемёт", "пулемет", "длинноус", "ружьё", "ружье"), "В"),
+    )
+    return next((result for needles, result in name_rules if any(needle in text for needle in needles)), "")
+
+
 def compact_conditions(conditions: str) -> str:
     result = re.sub(r"(?:^|[.;]\s*)Боеприпас:\s*[^.;]+[.;]?", "", conditions or "", flags=re.IGNORECASE)
     return result.strip(" .;") or "особых условий нет"
@@ -3478,7 +3512,7 @@ async def reload_command(interaction: discord.Interaction, оружие: str):
             "Выберите экипированное огнестрельное оружие из списка.", ephemeral=True
         )
         return
-    packages = ammo_packages(ammo_code(weapon["conditions"]))
+    packages = ammo_packages(weapon_ammo_code(weapon))
     if not packages:
         await interaction.response.send_message("Для оружия не определён тип боеприпаса.", ephemeral=True)
         return
@@ -3527,7 +3561,7 @@ async def unload_own_weapon_command(interaction: discord.Interaction, оружи
             "Выберите экипированное огнестрельное оружие из списка.", ephemeral=True
         )
         return
-    packages = ammo_packages(ammo_code(weapon["conditions"]))
+    packages = ammo_packages(weapon_ammo_code(weapon))
     if not packages:
         await interaction.response.send_message("Для оружия не определён тип боеприпаса.", ephemeral=True)
         return
@@ -3565,7 +3599,7 @@ async def admin_ammo_change(
     if not weapon or weapon["category"] != "Оружие дальнего боя" or weapon["ammo_max"] is None:
         await interaction.response.send_message("Огнестрельное оружие не найдено.", ephemeral=True)
         return
-    packages = ammo_packages(ammo_code(weapon["conditions"]))
+    packages = ammo_packages(weapon_ammo_code(weapon))
     if not packages:
         await interaction.response.send_message("Для оружия не определён тип боеприпаса.", ephemeral=True)
         return
