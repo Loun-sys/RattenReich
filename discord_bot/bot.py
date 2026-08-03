@@ -507,15 +507,47 @@ AMMO_CODES = {
     "иглы": "И",
     "огнесмесь": "О",
 }
-AMMO_ITEM_NAMES = {
-    "П": "Пистолетные боеприпасы",
-    "В": "Винтовочные боеприпасы",
-    "Д": "Дробовые боеприпасы",
-    "СР": "Сигнальные ракеты",
-    "Г": "Гарпуны с тросом",
-    "И": "Пачка закалённых игл",
-    "О": "Баллон огнесмеси",
+AMMO_PACKAGES = {
+    "П": (
+        "Малая упаковка пистолетных боеприпасов (3)",
+        "Средняя упаковка пистолетных боеприпасов (6)",
+        "Большая упаковка пистолетных боеприпасов (9)",
+    ),
+    "В": (
+        "Малая упаковка винтовочных боеприпасов (3)",
+        "Средняя упаковка винтовочных боеприпасов (6)",
+        "Большая упаковка винтовочных боеприпасов (9)",
+    ),
+    "Д": (
+        "Малая упаковка дробовых боеприпасов (3)",
+        "Средняя упаковка дробовых боеприпасов (6)",
+        "Большая упаковка дробовых боеприпасов (9)",
+    ),
+    "СР": (
+        "Малая упаковка сигнальных ракет (3)",
+        "Средняя упаковка сигнальных ракет (6)",
+        "Большая упаковка сигнальных ракет (9)",
+    ),
+    "Г": (
+        "Малая упаковка гарпунов (3)",
+        "Средняя упаковка гарпунов (6)",
+        "Большая упаковка гарпунов (9)",
+    ),
+    "И": (
+        "Малая упаковка закалённых игл (3)",
+        "Средняя упаковка закалённых игл (6)",
+        "Большая упаковка закалённых игл (9)",
+    ),
+    "О": (
+        "Малая упаковка огнесмеси (3)",
+        "Средняя упаковка огнесмеси (6)",
+        "Большая упаковка огнесмеси (9)",
+    ),
 }
+
+
+def ammo_packages(code: str) -> tuple[str, ...]:
+    return AMMO_PACKAGES.get(code, ())
 
 
 def ammo_code(conditions: str) -> str:
@@ -1048,7 +1080,10 @@ async def build_inventory_embed(
         if item["use_range"]:
             details.append(str(item["use_range"]).casefold())
         if item["ammo_max"] is not None:
-            details.append(f'боезапас {item["ammo"]}/{item["ammo_max"]}')
+            if "упаковка боеприпасов" in str(item.get("properties") or "").casefold():
+                details.append(f'патроны {item["ammo"]}/{item["ammo_max"]}')
+            else:
+                details.append(f'боезапас {item["ammo"]}/{item["ammo_max"]}')
         if item["fire_rate"]:
             details.append(f'СКР {item["fire_rate"]}')
         if item.get("attachments"):
@@ -3431,7 +3466,7 @@ async def ranged_npc_autocomplete(interaction: discord.Interaction, current: str
     return await npc_choices(interaction, current)
 
 
-@bot.tree.command(name="перезарядить", description="Заполнить магазин оружия патронами из инвентаря")
+@bot.tree.command(name="перезарядить", description="Зарядить оружие патронами из упаковок")
 async def reload_command(interaction: discord.Interaction, оружие: str):
     character = await bot.db.character(interaction.guild_id, interaction.user.id)
     if not character:
@@ -3440,32 +3475,25 @@ async def reload_command(interaction: discord.Interaction, оружие: str):
     weapon = await bot.db.inventory_item_by_name(character["id"], оружие, equipped_only=True)
     if not weapon or weapon["category"] != "Оружие дальнего боя" or weapon["ammo_max"] is None:
         await interaction.response.send_message(
-            "Выберите экипированное огнестрельное оружие из списка.",
-            ephemeral=True,
+            "Выберите экипированное огнестрельное оружие из списка.", ephemeral=True
         )
         return
-    code = ammo_code(weapon["conditions"])
-    ammo_name = AMMO_ITEM_NAMES.get(code)
-    if not ammo_name:
-        await interaction.response.send_message(
-            "Для этого оружия не определён тип боеприпаса.",
-            ephemeral=True,
-        )
+    packages = ammo_packages(ammo_code(weapon["conditions"]))
+    if not packages:
+        await interaction.response.send_message("Для оружия не определён тип боеприпаса.", ephemeral=True)
         return
-    result = await bot.db.reload_weapon(weapon["id"], character["id"], ammo_name)
+    result = await bot.db.reload_weapon(weapon["id"], character["id"], packages)
     if result is None:
-        await interaction.response.send_message(
-            f'В инвентаре нет патронов типа «{ammo_name}».',
-            ephemeral=True,
-        )
+        await interaction.response.send_message("Совместимые упаковки боеприпасов не найдены.", ephemeral=True)
         return
     before, after, maximum, loaded, remaining = result
     if loaded == 0:
-        await interaction.response.send_message("Боезапас оружия уже полный.", ephemeral=True)
+        message = "Боезапас оружия уже полный." if before >= maximum else "В совместимых упаковках нет патронов."
+        await interaction.response.send_message(message, ephemeral=True)
         return
     await interaction.response.send_message(
         f'**{weapon["name"]}**: **{before}/{maximum} → {after}/{maximum}**.\n'
-        f'Заряжено патронов: **{loaded}** · осталось в инвентаре: **{remaining}**.'
+        f'Заряжено: **{loaded}** · осталось в упаковках: **{remaining}**.'
     )
 
 
@@ -3480,15 +3508,14 @@ async def reload_weapon_autocomplete(interaction: discord.Interaction, current: 
             value=item["name"],
         )
         for item in await bot.db.inventory(character["id"])
-        if item["equipped"]
-        and item["durability"] > 0
+        if item["equipped"] and item["durability"] > 0
         and item["category"] == "Оружие дальнего боя"
         and item["ammo_max"] is not None
         and current.casefold() in item["name"].casefold()
     ][:25]
 
 
-@bot.tree.command(name="разрядить-оружие", description="Вернуть все патроны из оружия в инвентарь")
+@bot.tree.command(name="разрядить-оружие", description="Вернуть патроны оружия в упаковки")
 async def unload_own_weapon_command(interaction: discord.Interaction, оружие: str):
     character = await bot.db.character(interaction.guild_id, interaction.user.id)
     if not character:
@@ -3497,15 +3524,16 @@ async def unload_own_weapon_command(interaction: discord.Interaction, оружи
     weapon = await bot.db.inventory_item_by_name(character["id"], оружие, equipped_only=True)
     if not weapon or weapon["category"] != "Оружие дальнего боя" or weapon["ammo_max"] is None:
         await interaction.response.send_message(
-            "Выберите экипированное огнестрельное оружие из списка.",
-            ephemeral=True,
+            "Выберите экипированное огнестрельное оружие из списка.", ephemeral=True
         )
         return
-    ammo_name = AMMO_ITEM_NAMES.get(ammo_code(weapon["conditions"]))
-    if not ammo_name:
+    packages = ammo_packages(ammo_code(weapon["conditions"]))
+    if not packages:
         await interaction.response.send_message("Для оружия не определён тип боеприпаса.", ephemeral=True)
         return
-    result = await bot.db.unload_weapon(weapon["id"], character["id"], ammo_name)
+    result = await bot.db.unload_weapon(
+        weapon["id"], character["id"], packages, packages[1]
+    )
     if result is None:
         await interaction.response.send_message("Разрядить оружие не удалось.", ephemeral=True)
         return
@@ -3515,7 +3543,8 @@ async def unload_own_weapon_command(interaction: discord.Interaction, оружи
         return
     await interaction.response.send_message(
         f'**{weapon["name"]}**: **{before}/{maximum} → {after}/{maximum}**.\n'
-        f'Возвращено патронов: **{unloaded}** · теперь в инвентаре: **{inventory_after}**.'
+        f'В упаковки возвращено: **{unloaded}** · общий запас: **{inventory_after}**.\n'
+        'Если свободного места не хватало, бот создал среднюю упаковку.'
     )
 
 
@@ -3525,11 +3554,8 @@ async def unload_own_weapon_autocomplete(interaction: discord.Interaction, curre
 
 
 async def admin_ammo_change(
-    interaction: discord.Interaction,
-    member: discord.Member,
-    weapon_name: str,
-    amount: int,
-    load: bool,
+    interaction: discord.Interaction, member: discord.Member, weapon_name: str,
+    amount: int, load: bool,
 ):
     character = await bot.db.character(interaction.guild_id, member.id)
     if not character:
@@ -3539,49 +3565,40 @@ async def admin_ammo_change(
     if not weapon or weapon["category"] != "Оружие дальнего боя" or weapon["ammo_max"] is None:
         await interaction.response.send_message("Огнестрельное оружие не найдено.", ephemeral=True)
         return
-    ammo_name = AMMO_ITEM_NAMES.get(ammo_code(weapon["conditions"]))
-    if not ammo_name:
+    packages = ammo_packages(ammo_code(weapon["conditions"]))
+    if not packages:
         await interaction.response.send_message("Для оружия не определён тип боеприпаса.", ephemeral=True)
         return
     if load:
-        result = await bot.db.reload_weapon(
-            weapon["id"], character["id"], ammo_name, amount
-        )
+        result = await bot.db.reload_weapon(weapon["id"], character["id"], packages, amount)
     else:
         result = await bot.db.unload_weapon(
-            weapon["id"], character["id"], ammo_name, amount
+            weapon["id"], character["id"], packages, packages[1], amount
         )
     if result is None:
-        await interaction.response.send_message(
-            f'Не удалось изменить боезапас. Проверьте наличие патронов «{ammo_name}».',
-            ephemeral=True,
-        )
+        await interaction.response.send_message("Боезапас изменить не удалось.", ephemeral=True)
         return
     before, after, maximum, moved, inventory_after = result
-    direction = "заряжено" if load else "возвращено в инвентарь"
+    direction = "заряжено" if load else "возвращено в упаковки"
     await interaction.response.send_message(
         f'{member.mention} · **{weapon["name"]}**: **{before}/{maximum} → {after}/{maximum}**.\n'
-        f'Патронов {direction}: **{moved}** · запас в инвентаре: **{inventory_after}**.'
+        f'Патронов {direction}: **{moved}** · запас в упаковках: **{inventory_after}**.'
     )
 
 
-@bot.tree.command(name="разрядить", description="Разрядить оружие участника и вернуть патроны в инвентарь")
+@bot.tree.command(name="разрядить", description="Вернуть патроны оружия участника в упаковки")
 @app_commands.check(require_master_access)
 async def unload_weapon_command(
-    interaction: discord.Interaction,
-    участник: discord.Member,
-    оружие: str,
+    interaction: discord.Interaction, участник: discord.Member, оружие: str,
     количество: app_commands.Range[int, 1, 999],
 ):
     await admin_ammo_change(interaction, участник, оружие, количество, False)
 
 
-@bot.tree.command(name="дозарядить", description="Зарядить оружие участника патронами из инвентаря")
+@bot.tree.command(name="дозарядить", description="Зарядить оружие участника из упаковок")
 @app_commands.check(require_master_access)
 async def top_up_weapon_command(
-    interaction: discord.Interaction,
-    участник: discord.Member,
-    оружие: str,
+    interaction: discord.Interaction, участник: discord.Member, оружие: str,
     количество: app_commands.Range[int, 1, 999],
 ):
     await admin_ammo_change(interaction, участник, оружие, количество, True)
