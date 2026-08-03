@@ -282,8 +282,49 @@ class Database:
             await db.commit()
         await self.reload_base_catalog()
         await self.migrate_ammo_packages()
+        await self.repair_ammo_package_contents()
         await self.merge_stackable_inventory()
-        await self.split_nonstackable_inventory()
+     async def repair_ammo_package_contents(self) -> int:
+        """Одноразово наполняет упаковки, созданные из старых комплектов."""
+        repaired = 0
+        async with self.connect() as db:
+            done = await db.execute_fetchall(
+                "SELECT value FROM app_meta WHERE key='ammo_packages_v3_contents'"
+            )
+            if done:
+                return 0
+            rows = await db.execute_fetchall(
+                """SELECT inventory.id,inventory.character_id,inventory.item_id,
+                          inventory.quantity,inventory.ammo,item_catalog.ammo_max
+                   FROM inventory JOIN item_catalog ON item_catalog.id=inventory.item_id
+                   WHERE lower(item_catalog.properties) LIKE '%упаковка боеприпасов%'
+                     AND item_catalog.ammo_max IS NOT NULL"""
+            )
+            for row in rows:
+                quantity = max(1, int(row["quantity"] or 1))
+                maximum = max(1, int(row["ammo_max"] or 1))
+                current = int(row["ammo"] or 0)
+                if quantity > 1:
+                    await db.execute(
+                        "UPDATE inventory SET quantity=1,ammo=? WHERE id=?",
+                        (maximum if current <= 0 else min(maximum, current), row["id"]),
+                    )
+                    for _ in range(quantity - 1):
+                        await db.execute(
+                            "INSERT INTO inventory(character_id,item_id,quantity,durability,ammo,equipped) VALUES(?,?,1,1,?,0)",
+                            (row["character_id"], row["item_id"], maximum),
+                        )
+                    repaired += quantity
+                elif current <= 0:
+                    await db.execute("UPDATE inventory SET ammo=? WHERE id=?", (maximum, row["id"]))
+                    repaired += 1
+            await db.execute(
+                "INSERT OR REPLACE INTO app_meta(key,value) VALUES('ammo_packages_v3_contents','done')"
+            )
+            await db.commit()
+        return repaired
+
+       await self.split_nonstackable_inventory()
 
     async def migrate_ammo_packages(self) -> int:
         """Переносит старые комплекты/единицы в отдельные средние упаковки."""
