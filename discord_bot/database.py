@@ -1657,9 +1657,9 @@ class Database:
                 f"""SELECT inventory.id,inventory.ammo,item_catalog.ammo_max
                     FROM inventory JOIN item_catalog ON item_catalog.id=inventory.item_id
                     WHERE inventory.character_id=?
-                    AND lower(item_catalog.name) IN ({placeholders})
+                    AND item_catalog.name IN ({placeholders})
                     ORDER BY COALESCE(inventory.ammo,0),inventory.id""",
-                (character_id, *(name.casefold() for name in package_names)),
+                (character_id, *package_names),
             )
             available = sum(int(row["ammo"] or 0) for row in packages)
             requested = maximum - current if amount is None else max(0, int(amount))
@@ -1718,9 +1718,9 @@ class Database:
                 f"""SELECT inventory.id,inventory.ammo,item_catalog.ammo_max
                     FROM inventory JOIN item_catalog ON item_catalog.id=inventory.item_id
                     WHERE inventory.character_id=?
-                    AND lower(item_catalog.name) IN ({placeholders})
+                    AND item_catalog.name IN ({placeholders})
                     ORDER BY COALESCE(inventory.ammo,0) DESC,inventory.id""",
-                (character_id, *(name.casefold() for name in package_names)),
+                (character_id, *package_names),
             )
             left = requested
             for package in packages:
@@ -1766,8 +1766,8 @@ class Database:
                 f"""SELECT COALESCE(SUM(inventory.ammo),0) total
                     FROM inventory JOIN item_catalog ON item_catalog.id=inventory.item_id
                     WHERE inventory.character_id=?
-                    AND lower(item_catalog.name) IN ({placeholders})""",
-                (character_id, *(name.casefold() for name in package_names)),
+                    AND item_catalog.name IN ({placeholders})""",
+                (character_id, *package_names),
             )
             inventory_after = int(totals[0]["total"] or 0)
             await db.commit()
