@@ -1098,9 +1098,10 @@ async def build_inventory_embed(
     lines = []
     for item in visible_items:
         details = []
+        is_ammo_package = "упаковка боеприпасов" in str(item.get("properties") or "").casefold()
         if item["category"] in {"Броня", "Щит"}:
             details.append(f'защита {item["durability"]}/{item["max_durability"]}')
-        else:
+        elif not is_ammo_package:
             details.append(f'{item["durability"]} качества')
         if item["damage"]:
             details.append(f'{item["damage"]} урона')
@@ -1114,11 +1115,11 @@ async def build_inventory_embed(
         if item["use_range"]:
             details.append(str(item["use_range"]).casefold())
         if item["ammo_max"] is not None:
-            if "упаковка боеприпасов" in str(item.get("properties") or "").casefold():
+            if is_ammo_package:
                 details.append(f'патроны {item["ammo"]}/{item["ammo_max"]}')
             else:
                 details.append(f'боезапас {item["ammo"]}/{item["ammo_max"]}')
-        if item["fire_rate"]:
+        if item["fire_rate"] and not is_ammo_package:
             details.append(f'СКР {item["fire_rate"]}')
         if item.get("attachments"):
             details.append("насадки: " + ", ".join(item["attachments"]))
