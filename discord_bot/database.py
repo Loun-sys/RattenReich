@@ -387,9 +387,9 @@ class Database:
         return merged
 
     async def reload_base_catalog(self) -> int:
-        source = Path(__file__).resolve().parent.parent / "Каталог снабжения — оружие и снаряжение.md"
+        source = Path(__file__).resolve().parent / "ITEM_CATALOG_SOURCE.md"
         if not source.exists():
-            source = Path(__file__).resolve().parent / "ITEM_CATALOG_SOURCE.md"
+            source = Path(__file__).resolve().parent.parent / "Каталог снабжения — оружие и снаряжение.md"
         items = load_catalog(source)
         async with self.connect() as db:
             active_numbers = [int(item["source_number"]) for item in items]
