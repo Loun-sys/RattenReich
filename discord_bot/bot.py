@@ -20,6 +20,7 @@ from dotenv import load_dotenv
 
 from attachment_data import ATTACHMENT_BY_NAME, compatible
 from card_renderer import CardRenderer
+from catalog_loader import MULTI_USE_CONSUMABLES, is_consumable_item
 from constants import ATTRIBUTES, CLASSES, ITEM_CATEGORIES, ITEM_SIZES, RACES, RANGES, RANKS, SKILLS
 from database import Database
 from trauma_data import MENTAL_TRAUMAS, PHYSICAL_TRAUMAS, SOCIAL_TRAUMAS
@@ -100,6 +101,7 @@ class RattenBot(commands.Bot):
 
 bot = RattenBot()
 PENDING_ATTACKS: dict[tuple[int, int], "AttackView"] = {}
+LUCK_OWNER_ID = 338639020664029190
 MASTER_ROLE_IDS = frozenset({
     980168851658506269,
     980168851683696660,
@@ -149,6 +151,26 @@ def profile_embed(character: dict) -> discord.Embed:
     embed.add_field(name="Характеристики", value=stats, inline=True)
     embed.add_field(name="Состояние", value=f'**Воля:** {character["will_current"]}/{character["will_max"]}\n**Заражение:** {character["infection"]}/5\n**Бланки:** {character["supply_forms"]}', inline=True)
     embed.set_footer(text="Ratten Reich · полевой архив")
+    return embed
+
+
+def injuries_embed(character: dict, injuries: list[dict] | None = None) -> discord.Embed:
+    injuries = character.get("injuries", []) if injuries is None else injuries
+    lines = []
+    for injury in injuries:
+        expiry = f' · до {injury["expires_at"]} UTC' if injury.get("expires_at") else ""
+        lines.append(
+            f'**ID {injury["id"]} · №{injury["roll_code"]} {injury["name"]}** '
+            f'({injury["attribute_name"]})\n'
+            f'{injury["description"]}\n'
+            f'Штрафы: {injury["penalties"]} · {injury["duration"]}{expiry}'
+        )
+    embed = discord.Embed(
+        title=f'Травмы · {character["surname"]} {character["name"]}',
+        description=short("\n────────────\n".join(lines) or "Активных травм нет.", 4000),
+        color=0x7A342E,
+    )
+    embed.set_footer(text=f'Активных травм: {len(injuries)}')
     return embed
 
 
@@ -267,9 +289,106 @@ def talent_effect(character: dict, key: str, default=None):
     return values[-1]
 
 
+INJURY_SKILL_STEMS = {
+    "Выносливость": "вынослив",
+    "Сила": "сил",
+    "Драка": "драк",
+    "Скрытность": "скрытност",
+    "Проворство": "проворств",
+    "Стрельба": "стрельб",
+    "Наблюдательность": "наблюдательност",
+    "Анализ": "анализ",
+    "Знания": "знани",
+    "Проницательность": "проницательност",
+    "Влияние": "влияни",
+    "Воодушевление": "воодушевлен",
+    "Снабжение": "снабжен",
+    "Лечение": "лечен",
+    "Обращение": "обращен",
+    "Защита": "защит",
+}
+
+
+def normalized_injury_text(injury: dict) -> str:
+    return " ".join(
+        str(injury.get(key) or "") for key in ("description", "penalties")
+    ).casefold().replace("−", "-").replace("–", "-")
+
+
+def normalized_injury_penalties(injury: dict) -> str:
+    return str(injury.get("penalties") or "").casefold().replace("−", "-").replace("–", "-")
+
+
+def injury_skill_modifier_details(character: dict, skill: str) -> list[tuple[str, int]]:
+    stem = INJURY_SKILL_STEMS.get(skill, skill.casefold())
+    details = []
+    for injury in character.get("injuries", []):
+        text = normalized_injury_penalties(injury)
+        modifier = 0
+        all_match = re.search(r"-(\d+)\s+ко всем навыкам", text)
+        if all_match:
+            modifier -= int(all_match.group(1))
+        for match in re.finditer(r"([+-]\d+)\s+к\s+([^;]+)", text):
+            targets = match.group(2)
+            if "всем навыкам" not in targets and stem in targets:
+                modifier += int(match.group(1))
+        if modifier:
+            details.append((f'Травма «{injury["name"]}»', modifier))
+    return details
+
+
+def injury_blocks_skill(character: dict, skill: str) -> str | None:
+    stem = INJURY_SKILL_STEMS.get(skill, skill.casefold())
+    for injury in character.get("injuries", []):
+        text = normalized_injury_text(injury)
+        if "нельзя совершать проверки навыков" in text:
+            return injury["name"]
+        match = re.search(r"нельзя использовать ([^;]+)", text)
+        if match and "совместно" not in match.group(1) and stem in match.group(1):
+            return injury["name"]
+    return None
+
+
+def injury_blocks_two_handed(character: dict) -> str | None:
+    for injury in character.get("injuries", []):
+        text = normalized_injury_text(injury)
+        if "нельзя" in text and "двуручн" in text:
+            return injury["name"]
+    return None
+
+
+def injury_attribute_damage(character: dict, skill: str) -> int:
+    damage = 0
+    for injury in character.get("injuries", []):
+        text = normalized_injury_text(injury)
+        match = re.search(r"-(\d+)\s+телосложен", text)
+        if not match:
+            continue
+        affects_all = "использован" in text and "любого навыка" in text
+        affects_physical = "за проверку" in text and skill in {"Сила", "Проворство", "Драка"}
+        if affects_all or affects_physical:
+            damage += int(match.group(1))
+    return damage
+
+
+async def apply_injury_roll_damage(character: dict, skill: str) -> str:
+    amount = injury_attribute_damage(character, skill)
+    if amount <= 0:
+        return ""
+    return await apply_damage(character, "Телосложение", amount)
+
+
 def equipment_skill_modifier(items: list[dict], skill: str) -> int:
     total = 0
-    pattern = re.compile(rf"([+−-]\d+)\s+к\s+{re.escape(skill)}", re.IGNORECASE)
+    skill_stems = {
+        "Выносливость": "вынослив", "Сила": "сил", "Драка": "драк",
+        "Скрытность": "скрытност", "Проворство": "проворств", "Стрельба": "стрельб",
+        "Наблюдательность": "наблюдательност", "Анализ": "анализ", "Знания": "знани",
+        "Проницательность": "проницательност", "Влияние": "влияни",
+        "Воодушевление": "воодушевлен", "Снабжение": "снабжен",
+        "Лечение": "лечен", "Обращение": "обращен", "Защита": "защит",
+    }
+    skill_stem = skill_stems.get(skill, skill.casefold())
     attribute = SKILL_ATTRIBUTES.get(skill, "")
     for item in items:
         try:
@@ -280,8 +399,10 @@ def equipment_skill_modifier(items: list[dict], skill: str) -> int:
         total += int(structured_skills.get(skill, 0))
         total += int(structured_attributes.get(attribute, 0))
         text = item.get("conditions") or ""
-        for value in pattern.findall(text):
-            total += int(value.replace("−", "-"))
+        for sentence in re.split(r"[.;]", text):
+            bonus = re.search(r"([+−-]\d+)\s+к\s+(.+)", sentence, re.IGNORECASE)
+            if bonus and skill_stem in bonus.group(2).casefold():
+                total += int(bonus.group(1).replace("−", "-"))
     return total
 
 
@@ -391,12 +512,20 @@ def d6(count: int) -> list[int]:
     return [secrets.randbelow(6) + 1 for _ in range(max(0, count))]
 
 
-BURST_PENALTY_PER_FOLLOWUP_SHOT = 3
+def attack_damage(successes: int, base_damage: int, modifier: int = 0) -> int:
+    successes = max(0, int(successes))
+    if successes == 0:
+        return 0
+    return max(0, int(base_damage) + successes - 1 + int(modifier))
 
+def d6_with_luck(count: int, luck_percent: int = 0) -> list[int]:
+    """Secretly shift the chance of rolling a six by percentage points."""
+    chance = max(0, min(10_000, 1667 + int(luck_percent) * 100))
+    return [
+        6 if secrets.randbelow(10_000) < chance else secrets.randbelow(5) + 1
+        for _ in range(max(0, count))
+    ]
 
-def burst_shot_modifier(shot_index: int) -> int:
-    """Return the cumulative dice modifier for a zero-based shot index."""
-    return -(max(0, int(shot_index)) * BURST_PENALTY_PER_FOLLOWUP_SHOT)
 
 @dataclass
 class RollPool:
@@ -413,6 +542,7 @@ class RollPool:
     minimum_successes: int = 0
     skill_modifier_details: list[tuple[str, int]] = field(default_factory=list)
     success_modifier_details: list[tuple[str, int]] = field(default_factory=list)
+    luck_percent: int = 0
 
     @property
     def successes(self) -> int:
@@ -422,11 +552,17 @@ class RollPool:
         return max(self.minimum_successes, result) if self.minimum_successes > 0 else result
 
     def push(self) -> None:
-        reroll_positive = lambda values: [value if value in (1, 6) else d6(1)[0] for value in values]
+        reroll_positive = lambda values: [
+            value if value in (1, 6) else d6_with_luck(1, self.luck_percent)[0]
+            for value in values
+        ]
         self.attribute_dice = reroll_positive(self.attribute_dice)
         self.skill_dice = reroll_positive(self.skill_dice)
         self.gear_dice = {item_id: reroll_positive(values) for item_id, values in self.gear_dice.items()}
-        self.negative_dice = [value if value == 6 else d6(1)[0] for value in self.negative_dice]
+        self.negative_dice = [
+            value if value == 6 else d6_with_luck(1, -self.luck_percent)[0]
+            for value in self.negative_dice
+        ]
         self.push_count += 1
 
 
@@ -445,28 +581,33 @@ def make_pool(
     race_bonus = racial_skill_bonus(character, skill)
     talent_details = talent_skill_bonus_details(character, skill)
     talent_bonus = sum(value for _, value in talent_details)
-    skill_total = permanent_skill + race_bonus + talent_bonus + custom_modifier
+    injury_details = injury_skill_modifier_details(character, skill)
+    injury_modifier = sum(value for _, value in injury_details)
+    skill_total = permanent_skill + race_bonus + talent_bonus + injury_modifier + custom_modifier
     guaranteed = max(0, permanent_skill - 5) if skill in {"\u041b\u0435\u0447\u0435\u043d\u0438\u0435", "\u041e\u0431\u0440\u0430\u0449\u0435\u043d\u0438\u0435", "\u0417\u0430\u0449\u0438\u0442\u0430"} else 0
     modifier_details = []
     if race_bonus:
         modifier_details.append((f'\u0420\u0430\u0441\u0430 \u00ab{character["race"]}\u00bb', race_bonus))
     modifier_details.extend(talent_details)
+    modifier_details.extend(injury_details)
     if custom_modifier:
         modifier_details.append(("\u041f\u0440\u043e\u0447\u0438\u0435 \u043c\u043e\u0434\u0438\u0444\u0438\u043a\u0430\u0442\u043e\u0440\u044b", custom_modifier))
     maximum_rules = talent_effect(character, "max_attribute_for", {}) or {}
     attribute_value = character["attributes"][attribute]["max" if use_max_attribute or maximum_rules.get(skill) == attribute else "current"]
     minimum_rules = talent_effect(character, "minimum_success", {}) or {}
+    luck_percent = int(character.get("luck_percent") or 0)
     return RollPool(
         attribute=attribute,
         skill=skill,
-        attribute_dice=d6(int(attribute_value)),
-        skill_dice=d6(max(0, skill_total)),
-        negative_dice=d6(max(0, -skill_total)),
-        gear_dice={item_id: d6(count) for item_id, count in (gear or {}).items()},
+        attribute_dice=d6_with_luck(int(attribute_value), luck_percent),
+        skill_dice=d6_with_luck(max(0, skill_total), luck_percent),
+        negative_dice=d6_with_luck(max(0, -skill_total), -luck_percent),
+        gear_dice={item_id: d6_with_luck(count, luck_percent) for item_id, count in (gear or {}).items()},
         flat_success_modifier=success_modifier + guaranteed,
         minimum_successes=int(minimum_rules.get(skill, 0)),
         skill_modifier_details=modifier_details,
         success_modifier_details=([("\u041f\u043e\u0441\u0442\u043e\u044f\u043d\u043d\u044b\u0439 \u043d\u0430\u0432\u044b\u043a \u0432\u044b\u0448\u0435 5", guaranteed)] if guaranteed else []),
+        luck_percent=luck_percent,
     )
 
 
@@ -617,6 +758,14 @@ def pool_embed(pool: RollPool, title: str, conditions: str = "") -> discord.Embe
             value="\n".join(colored_dice(values, "gear") for values in pool.gear_dice.values()),
             inline=False,
         )
+    modifier_lines = [
+        f'{name}: **{value:+d}**' for name, value in pool.skill_modifier_details if value
+    ]
+    modifier_lines.extend(
+        f'{name}: **{value:+d} успеха**' for name, value in pool.success_modifier_details if value
+    )
+    if modifier_lines:
+        embed.add_field(name="Модификаторы", value="\n".join(modifier_lines), inline=False)
     modifier = (
         f" · модификатор успехов: **{pool.flat_success_modifier:+d}**"
         if pool.flat_success_modifier else ""
@@ -1106,9 +1255,13 @@ async def build_inventory_embed(
     for item in visible_items:
         details = []
         is_ammo_package = "упаковка боеприпасов" in str(item.get("properties") or "").casefold()
-        if item["category"] in {"Броня", "Щит"}:
+        if is_ammo_package:
+            pass
+        elif item["name"] in MULTI_USE_CONSUMABLES:
+            details.append(f'использований {item["durability"]}/{item["max_durability"]}')
+        elif item["category"] in {"Броня", "Щит"}:
             details.append(f'защита {item["durability"]}/{item["max_durability"]}')
-        elif not is_ammo_package:
+        else:
             details.append(f'{item["durability"]} качества')
         if item["damage"]:
             details.append(f'{item["damage"]} урона')
@@ -1447,14 +1600,37 @@ class AdminInventoryActionsView(discord.ui.View):
 
 
 STORE_CATEGORIES = (
+    "Все",
     "Снаряжение",
     "Оружие дальнего боя",
     "Оружие ближнего боя",
     "Броня",
+    "Насадка",
     "Разное",
 )
 STORE_PAGE_SIZE = 5
 ROMAN_LEVELS = {"I": 1, "II": 2, "III": 3, "IV": 4, "V": 5}
+STORE_SORT_LABELS = {
+    "name": "по названию",
+    "price_asc": "сначала дешёвые",
+    "price_desc": "сначала дорогие",
+    "access": "по возрастанию допуска",
+    "damage": "по урону",
+    "quality": "по качеству",
+    "fire_rate": "по скорострельности",
+}
+STORE_FILTER_LABELS = {
+    "size_small": "малые",
+    "size_large": "большие",
+    "consumable": "расходники",
+    "permanent": "нерасходуемые",
+    "access_public": "общедоступные",
+    "access_1": "допуск I",
+    "access_2": "допуск II",
+    "access_3": "допуск III",
+    "access_4": "допуск IV",
+    "access_5": "допуск V",
+}
 
 
 def store_category(item: dict) -> str:
@@ -1465,7 +1641,7 @@ def required_supply_level(item: dict) -> int | None:
     access = str(item.get("access") or "")
     if access.casefold() == "общедоступное":
         return 0
-    match = re.search(r"Снабжение\s+(I{1,3}|IV|V)\b", access, re.IGNORECASE)
+    match = re.search(r"Снабжениеs+(I{1,3}|IV|V)", access, re.IGNORECASE)
     return ROMAN_LEVELS.get(match.group(1).upper()) if match else None
 
 
@@ -1475,10 +1651,11 @@ def character_supply_level(character: dict) -> int:
     return int(character.get("skills", {}).get("Снабжение", -99))
 
 
-def can_purchase(character: dict, item: dict, category: str) -> bool:
+def can_purchase(character: dict, item: dict, category: str | None = None) -> bool:
     required = required_supply_level(item)
     return (
-        category != "Разное"
+        store_category(item) != "Разное"
+        and str(item.get("size") or "") != "Безделушка"
         and int(item.get("price") or 0) > 0
         and required is not None
         and (required == 0 or character_supply_level(character) >= required)
@@ -1489,7 +1666,7 @@ def store_price(character: dict, item: dict) -> int:
     price = int(item.get("price") or 0)
     if price <= 0:
         return price
-    discount = 1 if "\u0411\u044e\u0440\u043e\u043a\u0440\u0430\u0442\u0438\u044f" in character.get("talents", {}) else 0
+    discount = 1 if "Бюрократия" in character.get("talents", {}) else 0
     if character_supply_level(character) > 6:
         discount += 1
     return max(1, price - discount)
@@ -1499,9 +1676,12 @@ def visible_store_items(character: dict, items: list[dict], category: str) -> li
     level = character_supply_level(character)
     visible = []
     for item in items:
-        if store_category(item) != category:
+        if str(item.get("size") or "") == "Безделушка":
             continue
-        if category == "Разное":
+        item_category = store_category(item)
+        if category != "Все" and item_category != category:
+            continue
+        if item_category == "Разное":
             visible.append(item)
             continue
         required = required_supply_level(item)
@@ -1510,25 +1690,99 @@ def visible_store_items(character: dict, items: list[dict], category: str) -> li
     return visible
 
 
-def store_page_items(character: dict, items: list[dict], category: str, page: int) -> tuple[list[dict], int, int]:
+def visible_purchasable_items(character: dict, items: list[dict]) -> list[dict]:
+    return [item for item in items if can_purchase(character, item)]
+
+
+def filter_store_items(
+    character: dict,
+    items: list[dict],
+    category: str,
+    filters: frozenset[str],
+    sort_mode: str,
+) -> list[dict]:
     filtered = visible_store_items(character, items, category)
+    sizes = {
+        value for key, value in (
+            ("size_small", "Малый"),
+            ("size_large", "Большой"),
+        )
+        if key in filters
+    }
+    if sizes:
+        filtered = [item for item in filtered if str(item.get("size") or "") in sizes]
+
+    wants_consumable = "consumable" in filters
+    wants_permanent = "permanent" in filters
+    if wants_consumable != wants_permanent:
+        filtered = [
+            item for item in filtered
+            if is_consumable_item(item) == wants_consumable
+        ]
+
+    access_levels = {
+        level for level in range(6)
+        if ("access_public" if level == 0 else f"access_{level}") in filters
+    }
+    if access_levels:
+        filtered = [
+            item for item in filtered
+            if required_supply_level(item) in access_levels
+        ]
+
+    sorters = {
+        "name": lambda item: (str(item["name"]).casefold(),),
+        "price_asc": lambda item: (store_price(character, item), str(item["name"]).casefold()),
+        "price_desc": lambda item: (-store_price(character, item), str(item["name"]).casefold()),
+        "access": lambda item: (
+            required_supply_level(item) if required_supply_level(item) is not None else 99,
+            store_price(character, item),
+            str(item["name"]).casefold(),
+        ),
+        "damage": lambda item: (-int(item.get("damage") or 0), str(item["name"]).casefold()),
+        "quality": lambda item: (
+            -int(item.get("max_durability") or item.get("gear") or 0),
+            str(item["name"]).casefold(),
+        ),
+        "fire_rate": lambda item: (-int(item.get("fire_rate") or 0), str(item["name"]).casefold()),
+    }
+    filtered.sort(key=sorters.get(sort_mode, sorters["name"]))
+    return filtered
+
+
+def store_page_items(
+    character: dict,
+    items: list[dict],
+    category: str,
+    page: int,
+    filters: frozenset[str] = frozenset(),
+    sort_mode: str = "name",
+) -> tuple[list[dict], int, int, int]:
+    filtered = filter_store_items(character, items, category, filters, sort_mode)
     pages = max(1, (len(filtered) + STORE_PAGE_SIZE - 1) // STORE_PAGE_SIZE)
     page = max(0, min(page, pages - 1))
     start = page * STORE_PAGE_SIZE
-    return filtered[start:start + STORE_PAGE_SIZE], page, pages
+    return filtered[start:start + STORE_PAGE_SIZE], page, pages, len(filtered)
 
 
-def build_store_embed(character: dict, items: list[dict], category: str, page: int) -> discord.Embed:
-    visible, page, pages = store_page_items(character, items, category, page)
+def build_store_embed(
+    character: dict,
+    items: list[dict],
+    category: str,
+    page: int,
+    filters: frozenset[str] = frozenset(),
+    sort_mode: str = "name",
+) -> discord.Embed:
+    visible, page, pages, total = store_page_items(
+        character, items, category, page, filters, sort_mode
+    )
     lines = []
     for item in visible:
         required = required_supply_level(item)
-        if category == "Разное":
+        if store_category(item) == "Разное":
             status = "только просмотр"
         elif required is None:
             status = "не продаётся"
-        elif required and character_supply_level(character) < required:
-            status = f'требуется Снабжение {required}'
         else:
             status = "доступно"
         effective_price = store_price(character, item)
@@ -1546,12 +1800,26 @@ def build_store_embed(character: dict, items: list[dict], category: str, page: i
         )
     embed = discord.Embed(
         title=f"Магазин снабжения · {category}",
-        description=short("\n────────────\n".join(lines) or "В этой категории пока пусто.", 4000),
+        description=short("\n────────────\n".join(lines) or "По выбранным фильтрам ничего не найдено.", 4000),
         color=0x745B38,
     )
     supply_skill = (
         f'{character["skills"].get("Снабжение", -3):+d}'
         if character["class_name"] == "Снабженец" else "нет"
+    )
+    active_filters = ", ".join(
+        STORE_FILTER_LABELS[value]
+        for value in STORE_FILTER_LABELS
+        if value in filters
+    )
+    embed.add_field(
+        name="Фильтры",
+        value=(
+            f'**{active_filters or "не выбраны"}**\n'
+            f'Сортировка: **{STORE_SORT_LABELS.get(sort_mode, STORE_SORT_LABELS["name"])}** · '
+            f'найдено: **{total}**'
+        ),
+        inline=False,
     )
     embed.add_field(
         name="Лицевой счёт",
@@ -1560,6 +1828,88 @@ def build_store_embed(character: dict, items: list[dict], category: str, page: i
     )
     embed.set_footer(text=f"Страница {page + 1}/{pages} · выберите предмет в списке")
     return embed
+
+class StoreCategorySelect(discord.ui.Select):
+    def __init__(self, store_view: "StoreView"):
+        self.store_view = store_view
+        super().__init__(
+            placeholder="Категория товаров",
+            min_values=1,
+            max_values=1,
+            options=[
+                discord.SelectOption(
+                    label=category,
+                    value=category,
+                    default=category == store_view.category,
+                )
+                for category in STORE_CATEGORIES
+            ],
+            row=0,
+        )
+
+    async def callback(self, interaction: discord.Interaction):
+        await self.store_view.refresh(interaction, category=self.values[0], page=0)
+
+
+class StoreFilterSelect(discord.ui.Select):
+    def __init__(self, store_view: "StoreView"):
+        self.store_view = store_view
+        options = [
+            ("Малые предметы", "size_small", "Только предметы размера «Малый»"),
+            ("Большие предметы", "size_large", "Только предметы размера «Большой»"),
+            ("Расходники", "consumable", "Одноразовые и многозарядные расходники"),
+            ("Нерасходуемые", "permanent", "Постоянные предметы"),
+            ("Общедоступные", "access_public", "Без требования навыка Снабжение"),
+            ("Допуск I", "access_1", "Требуется Снабжение I"),
+            ("Допуск II", "access_2", "Требуется Снабжение II"),
+            ("Допуск III", "access_3", "Требуется Снабжение III"),
+            ("Допуск IV", "access_4", "Требуется Снабжение IV"),
+            ("Допуск V", "access_5", "Требуется Снабжение V"),
+        ]
+        super().__init__(
+            placeholder="Фильтры: размер, тип и допуск",
+            min_values=0,
+            max_values=len(options),
+            options=[
+                discord.SelectOption(
+                    label=label,
+                    value=value,
+                    description=description,
+                    default=value in store_view.filters,
+                )
+                for label, value, description in options
+            ],
+            row=1,
+        )
+
+    async def callback(self, interaction: discord.Interaction):
+        await self.store_view.refresh(
+            interaction, filters=frozenset(self.values), page=0
+        )
+
+
+class StoreSortSelect(discord.ui.Select):
+    def __init__(self, store_view: "StoreView"):
+        self.store_view = store_view
+        super().__init__(
+            placeholder="Сортировка",
+            min_values=1,
+            max_values=1,
+            options=[
+                discord.SelectOption(
+                    label=label,
+                    value=value,
+                    default=value == store_view.sort_mode,
+                )
+                for value, label in STORE_SORT_LABELS.items()
+            ],
+            row=2,
+        )
+
+    async def callback(self, interaction: discord.Interaction):
+        await self.store_view.refresh(
+            interaction, sort_mode=self.values[0], page=0
+        )
 
 
 class StoreItemSelect(discord.ui.Select):
@@ -1574,115 +1924,384 @@ class StoreItemSelect(discord.ui.Select):
                     label=item["name"][:100],
                     value=str(item["id"]),
                     description=f'{store_price(store_view.character, item)} БС · {item["access"]}'[:100],
+                    default=int(item["id"]) == store_view.selected_id,
                 )
                 for item in items
             ],
-            row=0,
+            row=3,
         )
 
     async def callback(self, interaction: discord.Interaction):
-        self.store_view.selected_id = int(self.values[0])
-        item = self.store_view.items[self.store_view.selected_id]
-        if can_purchase(self.store_view.character, item, self.store_view.category):
-            if self.store_view.buy_button not in self.store_view.children:
-                self.store_view.add_item(self.store_view.buy_button)
-        elif self.store_view.buy_button in self.store_view.children:
-            self.store_view.remove_item(self.store_view.buy_button)
-        await interaction.response.edit_message(view=self.store_view)
+        selected_id = int(self.values[0])
+        await self.store_view.refresh(
+            interaction, selected_id=selected_id, page=self.store_view.page
+        )
 
 
 class StoreView(discord.ui.View):
-    def __init__(self, character: dict, items: list[dict], category: str = "Снаряжение", page: int = 0):
-        super().__init__(timeout=300)
+    def __init__(
+        self,
+        character: dict,
+        items: list[dict],
+        category: str = "Снаряжение",
+        page: int = 0,
+        filters: frozenset[str] = frozenset(),
+        sort_mode: str = "name",
+        selected_id: int | None = None,
+    ):
+        super().__init__(timeout=600)
         self.character = character
+        self.item_list = items
         self.items = {int(item["id"]): item for item in items}
-        self.category = category
-        self.selected_id: int | None = None
-        visible, self.page, self.page_count = store_page_items(character, items, category, page)
+        self.category = category if category in STORE_CATEGORIES else "Снаряжение"
+        self.filters = frozenset(filters)
+        self.sort_mode = sort_mode if sort_mode in STORE_SORT_LABELS else "name"
+        self.selected_id = selected_id
+        visible, self.page, self.page_count, _ = store_page_items(
+            character, items, self.category, page, self.filters, self.sort_mode
+        )
+        self.add_item(StoreCategorySelect(self))
+        self.add_item(StoreFilterSelect(self))
+        self.add_item(StoreSortSelect(self))
         if visible:
             self.add_item(StoreItemSelect(self, visible))
-        self.add_item(PageSelect(self, self.page, self.page_count, row=3))
-        self.first_page.disabled = self.page == 0
         self.previous_page.disabled = self.page == 0
+        self.page_indicator.label = f"{self.page + 1}/{self.page_count}"
+        self.page_indicator.disabled = True
         self.next_page.disabled = self.page >= self.page_count - 1
-        self.last_page.disabled = self.page >= self.page_count - 1
-        self.remove_item(self.buy_button)
+        selected = self.items.get(self.selected_id)
+        self.buy_button.disabled = not (
+            selected and can_purchase(self.character, selected)
+        )
 
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
         if interaction.user.id != self.character["user_id"]:
-            await interaction.response.send_message("Этим магазином может пользоваться только его владелец.", ephemeral=True)
+            await interaction.response.send_message(
+                "Этим магазином может пользоваться только его владелец.", ephemeral=True
+            )
             return False
         return True
 
-    async def refresh(self, interaction: discord.Interaction, category: str | None = None, page: int | None = None):
+    async def refresh(
+        self,
+        interaction: discord.Interaction,
+        category: str | None = None,
+        page: int | None = None,
+        filters: frozenset[str] | None = None,
+        sort_mode: str | None = None,
+        selected_id: int | None = None,
+    ):
         character = await bot.db.character(interaction.guild_id, self.character["user_id"])
         items = await bot.db.catalog_items(interaction.guild_id, "", 500)
-        category = category or self.category
+        category = self.category if category is None else category
         page = self.page if page is None else page
+        filters = self.filters if filters is None else filters
+        sort_mode = self.sort_mode if sort_mode is None else sort_mode
+        view = StoreView(
+            character, items, category, page, filters, sort_mode, selected_id
+        )
         await interaction.response.edit_message(
-            embed=build_store_embed(character, items, category, page),
-            view=StoreView(character, items, category, page),
+            embed=build_store_embed(
+                character, items, view.category, view.page, view.filters, view.sort_mode
+            ),
+            view=view,
         )
 
-    @discord.ui.button(label="Снаряжение", style=discord.ButtonStyle.secondary, row=1)
-    async def equipment(self, interaction: discord.Interaction, _: discord.ui.Button):
-        await self.refresh(interaction, "Снаряжение", 0)
-
-    @discord.ui.button(label="Дальний бой", style=discord.ButtonStyle.secondary, row=1)
-    async def ranged(self, interaction: discord.Interaction, _: discord.ui.Button):
-        await self.refresh(interaction, "Оружие дальнего боя", 0)
-
-    @discord.ui.button(label="Ближний бой", style=discord.ButtonStyle.secondary, row=1)
-    async def melee(self, interaction: discord.Interaction, _: discord.ui.Button):
-        await self.refresh(interaction, "Оружие ближнего боя", 0)
-
-    @discord.ui.button(label="Броня", style=discord.ButtonStyle.secondary, row=1)
-    async def armor(self, interaction: discord.Interaction, _: discord.ui.Button):
-        await self.refresh(interaction, "Броня", 0)
-
-    @discord.ui.button(label="Разное", style=discord.ButtonStyle.secondary, row=4)
-    async def misc(self, interaction: discord.Interaction, _: discord.ui.Button):
-        await self.refresh(interaction, "Разное", 0)
-
-    @discord.ui.button(label="Насадки", style=discord.ButtonStyle.primary, row=1)
-    async def attachments(self, interaction: discord.Interaction, _: discord.ui.Button):
-        await self.refresh(interaction, "Насадка", 0)
-
-    @discord.ui.button(label="←", style=discord.ButtonStyle.secondary, row=2)
+    @discord.ui.button(label="←", style=discord.ButtonStyle.secondary, row=4)
     async def previous_page(self, interaction: discord.Interaction, _: discord.ui.Button):
         await self.refresh(interaction, page=self.page - 1)
 
-    @discord.ui.button(label="→", style=discord.ButtonStyle.secondary, row=2)
+    @discord.ui.button(label="1/1", style=discord.ButtonStyle.secondary, row=4)
+    async def page_indicator(self, interaction: discord.Interaction, _: discord.ui.Button):
+        pass
+
+    @discord.ui.button(label="→", style=discord.ButtonStyle.secondary, row=4)
     async def next_page(self, interaction: discord.Interaction, _: discord.ui.Button):
         await self.refresh(interaction, page=self.page + 1)
 
-    @discord.ui.button(label="В начало", style=discord.ButtonStyle.secondary, row=2)
-    async def first_page(self, interaction: discord.Interaction, _: discord.ui.Button):
-        await self.refresh(interaction, page=0)
+    @discord.ui.button(label="Сбросить", style=discord.ButtonStyle.secondary, row=4)
+    async def reset_filters(self, interaction: discord.Interaction, _: discord.ui.Button):
+        await self.refresh(
+            interaction,
+            category="Снаряжение",
+            page=0,
+            filters=frozenset(),
+            sort_mode="name",
+        )
 
-    @discord.ui.button(label="В конец", style=discord.ButtonStyle.secondary, row=2)
-    async def last_page(self, interaction: discord.Interaction, _: discord.ui.Button):
-        await self.refresh(interaction, page=self.page_count - 1)
-
-    @discord.ui.button(label="Купить", style=discord.ButtonStyle.success, row=2)
+    @discord.ui.button(label="Купить", style=discord.ButtonStyle.success, row=4)
     async def buy_button(self, interaction: discord.Interaction, _: discord.ui.Button):
         item = self.items.get(self.selected_id)
-        if not item or not can_purchase(self.character, item, self.category):
+        if not item or not can_purchase(self.character, item):
             await interaction.response.send_message("Этот предмет вам недоступен.", ephemeral=True)
             return
         required = required_supply_level(item) or 0
-        success, message, _ = await bot.db.purchase_item(self.character["id"], item["id"], required)
+        success, message, _ = await bot.db.purchase_item(
+            self.character["id"], item["id"], required
+        )
         if not success:
             await interaction.response.send_message(message, ephemeral=True)
             return
         base_price = int(item.get("price") or 0)
         paid = store_price(self.character, item)
         discount = max(0, base_price - paid)
-        await self.refresh(interaction)
+        character = await bot.db.character(interaction.guild_id, self.character["user_id"])
+        items = await bot.db.catalog_items(interaction.guild_id, "", 500)
+        view = StoreView(
+            character, items, self.category, self.page, self.filters, self.sort_mode
+        )
+        await interaction.response.edit_message(
+            embed=build_store_embed(
+                character, items, view.category, view.page, view.filters, view.sort_mode
+            ),
+            view=view,
+        )
         await interaction.followup.send(
-            f'{interaction.user.mention} \u043f\u043e\u043a\u0443\u043f\u0430\u0435\u0442 **{item["name"]}** \u0437\u0430 **{paid} \u0411\u0421**. \u0421\u043a\u0438\u0434\u043a\u0430: **{discount} \u0411\u0421**.',
+            f'{interaction.user.mention} заказывает **{item["name"]}** за **{paid} БС**. '
+            f'Скидка: **{discount} БС**. Заявка ожидает решения снабжения.',
             ephemeral=False,
         )
+
+SUPPLY_ORDER_PAGE_SIZE = 5
+
+
+def build_supply_orders_embed(orders: list[dict], page: int) -> discord.Embed:
+    pages = max(1, (len(orders) + SUPPLY_ORDER_PAGE_SIZE - 1) // SUPPLY_ORDER_PAGE_SIZE)
+    page = max(0, min(page, pages - 1))
+    visible = orders[page * SUPPLY_ORDER_PAGE_SIZE:(page + 1) * SUPPLY_ORDER_PAGE_SIZE]
+    lines = [
+        f'**#{order["id"]} · <@{order["user_id"]}> · {order["surname"]} {order["name"]}**\n'
+        f'└─ {order["item_name"]} · уплачено **{order["paid_price"]} БС**\n'
+        f'└─ заказ: **{order["ordered_at"]} UTC**'
+        for order in visible
+    ]
+    embed = discord.Embed(
+        title="Заявки снабжения",
+        description="\n────────────\n".join(lines) or "Ожидающих заявок нет.",
+        color=0x745B38,
+    )
+    embed.set_footer(text=f"Страница {page + 1}/{pages} · ожидает: {len(orders)}")
+    return embed
+
+
+class SupplyOrderSelect(discord.ui.Select):
+    def __init__(self, owner_view: "SupplyOrdersView", orders: list[dict]):
+        self.owner_view = owner_view
+        super().__init__(
+            placeholder="Выберите заявку",
+            min_values=1,
+            max_values=1,
+            options=[
+                discord.SelectOption(
+                    label=f'#{order["id"]} · {order["item_name"]}'[:100],
+                    value=str(order["id"]),
+                    description=f'{order["surname"]} {order["name"]} · {order["paid_price"]} БС'[:100],
+                )
+                for order in orders
+            ],
+            row=0,
+        )
+
+    async def callback(self, interaction: discord.Interaction):
+        self.owner_view.selected_id = int(self.values[0])
+        await interaction.response.edit_message(view=self.owner_view)
+
+
+class SupplyOrdersView(discord.ui.View):
+    def __init__(self, admin_id: int, guild_id: int, orders: list[dict], page: int = 0):
+        super().__init__(timeout=600)
+        self.admin_id = admin_id
+        self.guild_id = guild_id
+        self.orders = orders
+        self.pages = max(1, (len(orders) + SUPPLY_ORDER_PAGE_SIZE - 1) // SUPPLY_ORDER_PAGE_SIZE)
+        self.page = max(0, min(page, self.pages - 1))
+        self.selected_id: int | None = None
+        visible = orders[self.page * SUPPLY_ORDER_PAGE_SIZE:(self.page + 1) * SUPPLY_ORDER_PAGE_SIZE]
+        if visible:
+            self.add_item(SupplyOrderSelect(self, visible))
+        self.previous.disabled = self.page == 0
+        self.next.disabled = self.page >= self.pages - 1
+        self.approve.disabled = not visible
+        self.reject.disabled = not visible
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if interaction.user.id != self.admin_id or not has_master_access(interaction):
+            await interaction.response.send_message(MASTER_ACCESS_ERROR, ephemeral=True)
+            return False
+        return True
+
+    async def refresh(self, interaction: discord.Interaction, page: int | None = None):
+        orders = await bot.db.pending_purchase_orders(self.guild_id)
+        target_page = self.page if page is None else page
+        view = SupplyOrdersView(self.admin_id, self.guild_id, orders, target_page)
+        await interaction.response.edit_message(
+            embed=build_supply_orders_embed(orders, view.page),
+            view=view,
+        )
+
+    async def resolve(self, interaction: discord.Interaction, approve: bool):
+        if self.selected_id is None:
+            await interaction.response.send_message("Сначала выберите заявку.", ephemeral=True)
+            return
+        success, message, order = await bot.db.resolve_purchase_order(
+            self.guild_id, self.selected_id, interaction.user.id, approve,
+        )
+        if not success:
+            await interaction.response.send_message(message, ephemeral=True)
+            return
+        orders = await bot.db.pending_purchase_orders(self.guild_id)
+        view = SupplyOrdersView(self.admin_id, self.guild_id, orders, self.page)
+        await interaction.response.edit_message(
+            embed=build_supply_orders_embed(orders, view.page),
+            view=view,
+        )
+        await interaction.followup.send(message, ephemeral=True)
+        if order:
+            member = interaction.guild.get_member(int(order["user_id"])) if interaction.guild else None
+            if member:
+                try:
+                    result = "одобрена — предмет добавлен на склад снабжения" if approve else f'отклонена — возвращено {order["paid_price"]} БС'
+                    await member.send(f'Ваша заявка на **{order["item_name"]}** {result}.')
+                except discord.HTTPException:
+                    pass
+
+    @discord.ui.button(label="Одобрить", style=discord.ButtonStyle.success, row=1)
+    async def approve(self, interaction: discord.Interaction, _: discord.ui.Button):
+        await self.resolve(interaction, True)
+
+    @discord.ui.button(label="Отклонить", style=discord.ButtonStyle.danger, row=1)
+    async def reject(self, interaction: discord.Interaction, _: discord.ui.Button):
+        await self.resolve(interaction, False)
+
+    @discord.ui.button(label="←", style=discord.ButtonStyle.secondary, row=2)
+    async def previous(self, interaction: discord.Interaction, _: discord.ui.Button):
+        await self.refresh(interaction, self.page - 1)
+
+    @discord.ui.button(label="→", style=discord.ButtonStyle.secondary, row=2)
+    async def next(self, interaction: discord.Interaction, _: discord.ui.Button):
+        await self.refresh(interaction, self.page + 1)
+
+
+WAREHOUSE_PAGE_SIZE = 20
+
+
+def build_warehouse_embed(items: list[dict], mode: str, page: int) -> discord.Embed:
+    pages = max(1, (len(items) + WAREHOUSE_PAGE_SIZE - 1) // WAREHOUSE_PAGE_SIZE)
+    page = max(0, min(page, pages - 1))
+    visible = items[page * WAREHOUSE_PAGE_SIZE:(page + 1) * WAREHOUSE_PAGE_SIZE]
+    lines = []
+    for item in visible:
+        state = f' ×{item["quantity"]}' if int(item.get("quantity") or 1) > 1 else ""
+        if item["name"] in MULTI_USE_CONSUMABLES:
+            state += f' · использований {item["durability"]}/{item["max_durability"]}'
+        elif item.get("max_durability"):
+            state += f' · прочность {item["durability"]}/{item["max_durability"]}'
+        if item.get("ammo") is not None:
+            state += f' · боезапас {item["ammo"]}/{item.get("ammo_max") or 0}'
+        lines.append(f'**{item["name"]}**{state}')
+    title = "Склад снабжения" if mode == "warehouse" else "Передача на склад · мой инвентарь"
+    empty = "Склад пуст." if mode == "warehouse" else "Нет доступных для передачи предметов."
+    embed = discord.Embed(title=title, description="\n".join(lines) or empty, color=0x745B38)
+    embed.set_footer(text=f"Страница {page + 1}/{pages} · предметов: {len(items)}")
+    return embed
+
+
+class WarehouseItemSelect(discord.ui.Select):
+    def __init__(self, owner_view: "SupplyWarehouseView", items: list[dict]):
+        self.owner_view = owner_view
+        options = []
+        for item in items:
+            suffix = f' ×{item["quantity"]}' if int(item.get("quantity") or 1) > 1 else ""
+            options.append(discord.SelectOption(
+                label=f'{item["name"]}{suffix}'[:100],
+                value=str(item["id"]),
+                description=f'{item["category"]} · {item["size"]}'[:100],
+            ))
+        super().__init__(placeholder="Выберите предмет", min_values=1, max_values=1, options=options, row=0)
+
+    async def callback(self, interaction: discord.Interaction):
+        self.owner_view.selected_id = int(self.values[0])
+        await interaction.response.edit_message(view=self.owner_view)
+
+
+class SupplyWarehouseView(discord.ui.View):
+    def __init__(self, character: dict, items: list[dict], mode: str = "warehouse", page: int = 0):
+        super().__init__(timeout=600)
+        self.character = character
+        self.owner_id = int(character["user_id"])
+        self.mode = mode
+        self.items = items
+        self.pages = max(1, (len(items) + WAREHOUSE_PAGE_SIZE - 1) // WAREHOUSE_PAGE_SIZE)
+        self.page = max(0, min(page, self.pages - 1))
+        self.selected_id: int | None = None
+        visible = items[self.page * WAREHOUSE_PAGE_SIZE:(self.page + 1) * WAREHOUSE_PAGE_SIZE]
+        if visible:
+            self.add_item(WarehouseItemSelect(self, visible))
+        self.take.disabled = mode != "warehouse" or not visible
+        self.deposit.disabled = mode != "inventory" or not visible
+        self.previous.disabled = self.page == 0
+        self.next.disabled = self.page >= self.pages - 1
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if interaction.user.id != self.owner_id:
+            await interaction.response.send_message("Этим меню может управлять только открывший его игрок.", ephemeral=True)
+            return False
+        return True
+
+    async def load(self, mode: str) -> list[dict]:
+        if mode == "warehouse":
+            return await bot.db.supply_warehouse_items(self.character["guild_id"])
+        return [item for item in await bot.db.inventory(self.character["id"]) if not item["equipped"]]
+
+    async def refresh(self, interaction: discord.Interaction, mode: str | None = None, page: int | None = None):
+        target_mode = mode or self.mode
+        items = await self.load(target_mode)
+        view = SupplyWarehouseView(self.character, items, target_mode, self.page if page is None else page)
+        await interaction.response.edit_message(embed=build_warehouse_embed(items, target_mode, view.page), view=view)
+
+    @discord.ui.button(label="Склад", style=discord.ButtonStyle.primary, row=1)
+    async def warehouse(self, interaction: discord.Interaction, _: discord.ui.Button):
+        await self.refresh(interaction, "warehouse", 0)
+
+    @discord.ui.button(label="Мой инвентарь", style=discord.ButtonStyle.secondary, row=1)
+    async def inventory(self, interaction: discord.Interaction, _: discord.ui.Button):
+        await self.refresh(interaction, "inventory", 0)
+
+    @discord.ui.button(label="Взять", style=discord.ButtonStyle.success, row=2)
+    async def take(self, interaction: discord.Interaction, _: discord.ui.Button):
+        if self.selected_id is None:
+            await interaction.response.send_message("Сначала выберите предмет.", ephemeral=True)
+            return
+        success, message = await bot.db.take_from_supply_warehouse(
+            self.character["guild_id"], self.character["id"], self.selected_id
+        )
+        if not success:
+            await interaction.response.send_message(message, ephemeral=True)
+            return
+        await self.refresh(interaction)
+        await interaction.followup.send(f"{interaction.user.mention}: {message}", ephemeral=False)
+
+    @discord.ui.button(label="Положить", style=discord.ButtonStyle.danger, row=2)
+    async def deposit(self, interaction: discord.Interaction, _: discord.ui.Button):
+        if self.selected_id is None:
+            await interaction.response.send_message("Сначала выберите предмет.", ephemeral=True)
+            return
+        success, message = await bot.db.deposit_to_supply_warehouse(
+            self.character["guild_id"], self.character["id"], self.selected_id, interaction.user.id
+        )
+        if not success:
+            await interaction.response.send_message(message, ephemeral=True)
+            return
+        await self.refresh(interaction)
+        await interaction.followup.send(f"{interaction.user.mention}: {message}", ephemeral=False)
+
+    @discord.ui.button(label="←", style=discord.ButtonStyle.secondary, row=3)
+    async def previous(self, interaction: discord.Interaction, _: discord.ui.Button):
+        await self.refresh(interaction, page=self.page - 1)
+
+    @discord.ui.button(label="→", style=discord.ButtonStyle.secondary, row=3)
+    async def next(self, interaction: discord.Interaction, _: discord.ui.Button):
+        await self.refresh(interaction, page=self.page + 1)
 
 
 TALENT_PAGE_SIZE = 5
@@ -2048,15 +2667,8 @@ class CharacterPanel(discord.ui.View):
     @discord.ui.button(label="Травмы", style=discord.ButtonStyle.secondary, custom_id="rr:injuries", row=2)
     async def injuries(self, interaction: discord.Interaction, _: discord.ui.Button):
         character = await get_character(interaction)
-        if not character:
-            return
-        injuries = await self.client.db.list_rows("injuries", character["id"])
-        lines = []
-        for injury in injuries:
-            expiry = f' · до {injury["expires_at"]} UTC' if injury.get("expires_at") else ""
-            lines.append(f'`#{injury["id"]}` **№{injury["roll_code"]} {injury["name"]}** ({injury["attribute_name"]})\n{injury["penalties"]} · {injury["duration"]}{expiry}')
-        embed = discord.Embed(title="Активные травмы", description=short("\n\n".join(lines) or "Нет активных травм", 4000), color=0x7A342E)
-        await interaction.response.send_message(embed=embed)
+        if character:
+            await interaction.response.send_message(embed=injuries_embed(character))
 
     @discord.ui.button(label="Заметки", style=discord.ButtonStyle.secondary, custom_id="rr:notes", row=2)
     async def notes(self, interaction: discord.Interaction, _: discord.ui.Button):
@@ -2266,17 +2878,15 @@ class AttackView(discord.ui.View):
                 parts.append(f'Снаряжение: {colored_dice(next(iter(pool.gear_dice.values()), []), "gear")}')
             if pool.negative_dice:
                 parts.append(f'Отрицательные: {colored_dice(pool.negative_dice, "negative")}')
+            if pool.skill_modifier_details:
+                parts.append("Модификаторы кубов: " + ", ".join(
+                    f'{name} **{value:+d}**' for name, value in pool.skill_modifier_details if value
+                ))
             if pool.flat_success_modifier:
                 parts.append(f'Модификатор успехов: **{pool.flat_success_modifier:+d}**')
             parts.append(f'Успехов: **{pool.successes}**')
             value = "\n".join(parts)
             embed.add_field(name=f"Очередь {index}", value=value, inline=False)
-        if self.ranged and len(self.pools) > 1:
-            embed.add_field(
-                name="Штраф очереди",
-                value="Каждый последующий выстрел: **−3 куба** (накопительно: −3, −6, −9…).",
-                inline=False,
-            )
         if self.distance:
             embed.add_field(
                 name="Дистанция",
@@ -2290,8 +2900,8 @@ class AttackView(discord.ui.View):
                 inline=True,
             )
             embed.add_field(name="Условия оружия", value=short(self.weapon["conditions"]), inline=False)
-        damage_factor = max(1, int(self.weapon["damage"])) if self.weapon else 1
-        damage_before_defense = max(0, self.attack_successes * damage_factor + self.damage_modifier)
+        base_damage = max(1, int(self.weapon["damage"])) if self.weapon else 1
+        damage_before_defense = attack_damage(self.attack_successes, base_damage, self.damage_modifier)
         modifier_text = (
             f' · модификатор урона: **{self.damage_modifier:+d}**'
             if self.damage_modifier else ""
@@ -2320,8 +2930,8 @@ class AttackView(discord.ui.View):
             return
         self.resolved = True
         net = max(0, self.attack_successes - defense_successes)
-        damage_factor = max(1, int(self.weapon["damage"])) if self.weapon else 1
-        raw_damage = max(0, net * damage_factor + self.damage_modifier)
+        base_damage = max(1, int(self.weapon["damage"])) if self.weapon else 1
+        raw_damage = attack_damage(net, base_damage, self.damage_modifier)
         target = await bot.db.character(interaction.guild_id, self.target_id)
         lines = [f"Атака: **{self.attack_successes}**", f"Защита: **{defense_successes}**"]
         target_items = {row["id"]: row for row in await bot.db.inventory(target["id"])}
@@ -2414,6 +3024,23 @@ class AttackView(discord.ui.View):
             embed.add_field(name="Цена риска", value=short("\n".join(costs)), inline=False)
         await interaction.response.edit_message(embed=embed, view=self)
 
+    @discord.ui.button(label="Завершить бросок", style=discord.ButtonStyle.secondary)
+    async def finish_roll_button(self, interaction: discord.Interaction, _: discord.ui.Button):
+        if self.resolved or interaction.user.id != self.attacker_id:
+            await interaction.response.send_message(
+                "Завершить бросок может только атакующий.", ephemeral=True
+            )
+            return
+        self.push_button.disabled = True
+        self.finish_roll_button.disabled = True
+        embed = self.attack_embed()
+        embed.add_field(
+            name="Бросок завершён",
+            value="Атакующий подтвердил отказ от дальнейшего пуша.",
+            inline=False,
+        )
+        await interaction.response.edit_message(embed=embed, view=self)
+
     @discord.ui.button(label="Защищаться", style=discord.ButtonStyle.success)
     async def defend_button(self, interaction: discord.Interaction, _: discord.ui.Button):
         if self.resolved or interaction.user.id != self.target_id:
@@ -2428,6 +3055,7 @@ class AttackView(discord.ui.View):
         damage_reduction_modifier: int = 0,
     ):
         target = await bot.db.character(interaction.guild_id, self.target_id)
+        luck_percent = int(target.get("luck_percent") or 0)
         weapon_text = " ".join(
             str((self.weapon or {}).get(key) or "")
             for key in ("damage_type", "properties", "conditions")
@@ -2438,26 +3066,26 @@ class AttackView(discord.ui.View):
             if item["equipped"] and item["durability"] > 0 and item["category"] in {"Броня", "Щит"}
         ]
         armor_rolls = {
-            item["id"]: d6(int(item["durability"]))
+            item["id"]: d6_with_luck(int(item["durability"]), luck_percent)
             for item in equipped
             if item["category"] == "Броня" and not ignores_armor
         }
         armor_rolls.update({
-            item["id"]: d6(int(item["durability"]))
+            item["id"]: d6_with_luck(int(item["durability"]), luck_percent)
             for item in equipped
             if item["category"] == "Щит"
         })
         indestructible_rolls = {}
-        custom_defense_rolls = d6(max(0, extra_dice))
-        negative_defense_rolls = d6(max(0, -extra_dice))
+        custom_defense_rolls = d6_with_luck(max(0, extra_dice), luck_percent)
+        negative_defense_rolls = d6_with_luck(max(0, -extra_dice), -luck_percent)
         for item in equipped:
             if ignores_armor and item["category"] == "Броня":
                 continue
             count = armor_indestructible_dice(item, self.weapon, self.distance)
             if count:
-                indestructible_rolls[item["name"]] = d6(count)
+                indestructible_rolls[item["name"]] = d6_with_luck(count, luck_percent)
         if target["race"] == "Тараканы" and not ignores_armor:
-            indestructible_rolls["Хитиновая броня"] = d6(2)
+            indestructible_rolls["Хитиновая броня"] = d6_with_luck(2, luck_percent)
         successes = sum(value == 6 for values in armor_rolls.values() for value in values)
         successes += sum(
             value == 6
@@ -2870,10 +3498,14 @@ async def supply(
     if not character:
         await interaction.response.send_message("У выбранного участника нет зарегистрированного персонажа.", ephemeral=True)
         return
-    delta = количество if действие.value == "add" else -количество
-    value = max(0, character["supply_forms"] + delta)
+    before = int(character["supply_forms"])
+    requested_delta = количество if действие.value == "add" else -количество
+    value = max(0, before + requested_delta)
+    applied_delta = value - before
     await bot.db.update_character(character["id"], "supply_forms", value)
-    await interaction.response.send_message(f'{участник.mention}: бланки снабжения — **{value}**.')
+    await interaction.response.send_message(
+        f'{участник.mention}: бланки снабжения — **{applied_delta:+d} → {value}**.'
+    )
 
 
 @bot.tree.command(name="воля", description="Изменить текущую Волю персонажа")
@@ -3005,6 +3637,84 @@ async def store_command(interaction: discord.Interaction):
     )
 
 
+@bot.tree.command(name="снабжение", description="Рассмотреть ожидающие заявки на покупку предметов")
+@app_commands.check(require_master_access)
+async def supply_orders_command(interaction: discord.Interaction):
+    orders = await bot.db.pending_purchase_orders(interaction.guild_id)
+    await interaction.response.send_message(
+        embed=build_supply_orders_embed(orders, 0),
+        view=SupplyOrdersView(interaction.user.id, interaction.guild_id, orders),
+        ephemeral=True,
+    )
+
+
+@bot.tree.command(name="склад-снабжения", description="Взять предмет с общего склада или положить свой")
+async def supply_warehouse_command(interaction: discord.Interaction):
+    character = await bot.db.character(interaction.guild_id, interaction.user.id)
+    if not character:
+        await interaction.response.send_message("Сначала зарегистрируйте персонажа.", ephemeral=True)
+        return
+    items = await bot.db.supply_warehouse_items(interaction.guild_id)
+    await interaction.response.send_message(
+        embed=build_warehouse_embed(items, "warehouse", 0),
+        view=SupplyWarehouseView(character, items),
+        ephemeral=False,
+    )
+
+
+@bot.tree.command(name="купить", description="Купить доступный предмет по названию без листания магазина")
+@app_commands.describe(предмет="Точное название предмета из доступного вам магазина")
+async def buy_item_command(interaction: discord.Interaction, предмет: str):
+    character = await bot.db.character(interaction.guild_id, interaction.user.id)
+    if not character:
+        await interaction.response.send_message("Сначала зарегистрируйте персонажа.", ephemeral=True)
+        return
+    items = await bot.db.catalog_items(interaction.guild_id, "", 500)
+    visible = visible_purchasable_items(character, items)
+    item = next(
+        (candidate for candidate in visible if candidate["name"].casefold() == предмет.strip().casefold()),
+        None,
+    )
+    if not item:
+        await interaction.response.send_message(
+            "Этот предмет не найден среди доступных вам товаров магазина.",
+            ephemeral=True,
+        )
+        return
+    required = required_supply_level(item) or 0
+    success, message, _ = await bot.db.purchase_item(character["id"], item["id"], required)
+    if not success:
+        await interaction.response.send_message(message, ephemeral=True)
+        return
+    base_price = int(item.get("price") or 0)
+    paid = store_price(character, item)
+    discount = max(0, base_price - paid)
+    await interaction.response.send_message(
+        f'{interaction.user.mention} заказывает **{item["name"]}** за **{paid} БС**. '
+        f'Скидка: **{discount} БС**. Заявка ожидает решения снабжения.',
+        ephemeral=False,
+    )
+
+
+@buy_item_command.autocomplete("предмет")
+async def buy_item_autocomplete(interaction: discord.Interaction, current: str):
+    character = await bot.db.character(interaction.guild_id, interaction.user.id)
+    if not character:
+        return []
+    items = await bot.db.catalog_items(interaction.guild_id, "", 500)
+    query = current.casefold().strip()
+    visible = visible_purchasable_items(character, items)
+    matches = [item for item in visible if query in item["name"].casefold()]
+    matches.sort(key=lambda item: (not item["name"].casefold().startswith(query), item["name"].casefold()))
+    return [
+        app_commands.Choice(
+            name=f'{item["name"]} · {store_price(character, item)} БС'[:100],
+            value=item["name"][:100],
+        )
+        for item in matches[:25]
+    ]
+
+
 @bot.tree.command(name="магазин-талантов", description="Открыть магазин талантов за 16 Бланков Снабжения")
 async def talent_store_command(interaction: discord.Interaction):
     character = await bot.db.character(interaction.guild_id, interaction.user.id)
@@ -3055,7 +3765,10 @@ async def item_transfer_autocomplete(interaction: discord.Interaction, current: 
         return []
     return [
         app_commands.Choice(
-            name=f'{item["name"]} ×{item["quantity"]}'[:100],
+            name=(
+                f'{item["name"]} ×{item["quantity"]}'
+                + (f' · использований {item["durability"]}/{item["max_durability"]}' if item["name"] in MULTI_USE_CONSUMABLES else "")
+            )[:100],
             value=item["name"],
         )
         for item in await bot.db.inventory(character["id"])
@@ -3124,6 +3837,12 @@ async def view_talents_command(
 
 
 @bot.tree.command(name="ролл", description="Бросить проверку навыка")
+@app_commands.describe(
+    навык="Проверяемый навык",
+    снаряжение="Необязательный предмет для броска",
+    бонус="Дополнительные положительные кубы (необязательно)",
+    штраф="Дополнительные отрицательные кубы (необязательно)",
+)
 async def skill_roll_command(
     interaction: discord.Interaction,
     навык: str,
@@ -3139,6 +3858,13 @@ async def skill_roll_command(
     skill = normalize(навык, tuple(character["skills"]))
     if not skill or skill not in SKILL_ATTRIBUTES:
         await interaction.response.send_message("Выберите навык персонажа из списка.", ephemeral=True)
+        return
+    blocked_by = injury_blocks_skill(character, skill)
+    if blocked_by:
+        await interaction.response.send_message(
+            f'Травма «{blocked_by}» не позволяет использовать навык **{skill}**.',
+            ephemeral=True,
+        )
         return
     item = None
     gear: dict[int, int] = {}
@@ -3161,12 +3887,77 @@ async def skill_roll_command(
         character, skill, бонус - штраф + auto_modifier, gear,
         success_modifier=success_modifier,
     )
+    pool.skill_modifier_details = [
+        detail for detail in pool.skill_modifier_details if detail[0] != "Прочие модификаторы"
+    ]
+    if auto_modifier:
+        pool.skill_modifier_details.append(("Снаряжение", auto_modifier))
+    if бонус:
+        pool.skill_modifier_details.append(("Опциональный бонус", бонус))
+    if штраф:
+        pool.skill_modifier_details.append(("Опциональный штраф", -штраф))
     conditions = item["conditions"] if item else ""
+    embed = pool_embed(pool, f"Проверка · {skill}", conditions)
+    injury_damage = await apply_injury_roll_damage(character, skill)
+    if injury_damage:
+        embed.add_field(name="Последствие травмы", value=injury_damage, inline=False)
     await interaction.response.send_message(
-        embed=pool_embed(pool, f"Проверка · {skill}", conditions),
+        embed=embed,
         view=SkillRollView(interaction.user.id, character, pool, conditions, can_push=skill != "Стрельба"),
     )
 
+
+@bot.tree.command(name="бросок", description="Бросить произвольное количество цветных кубов")
+@app_commands.describe(
+    желтые="Количество жёлтых кубов",
+    зеленые="Количество зелёных кубов",
+    негативные="Количество негативных кубов",
+)
+async def free_dice_roll_command(
+    interaction: discord.Interaction,
+    желтые: app_commands.Range[int, 0, 50] = 0,
+    зеленые: app_commands.Range[int, 0, 50] = 0,
+    негативные: app_commands.Range[int, 0, 50] = 0,
+):
+    if желтые + зеленые + негативные <= 0:
+        await interaction.response.send_message(
+            "Укажите хотя бы один куб для броска.", ephemeral=True,
+        )
+        return
+    luck_percent = await bot.db.get_luck_modifier(interaction.user.id)
+    yellow_rolls = d6_with_luck(желтые, luck_percent)
+    green_rolls = d6_with_luck(зеленые, luck_percent)
+    negative_rolls = d6_with_luck(негативные, -luck_percent)
+    positive_successes = sum(value == 6 for value in yellow_rolls + green_rolls)
+    negative_successes = sum(value == 6 for value in negative_rolls)
+    embed = discord.Embed(title="Свободный бросок", color=0x6E654F)
+
+    def add_dice_fields(label: str, values: list[int], color: str) -> None:
+        for offset in range(0, len(values), 25):
+            chunk = values[offset:offset + 25]
+            part = offset // 25 + 1
+            parts = (len(values) + 24) // 25
+            suffix = f" · часть {part}/{parts}" if parts > 1 else ""
+            embed.add_field(
+                name=f"{label} · {len(values)}{suffix}",
+                value=colored_dice(chunk, color),
+                inline=False,
+            )
+
+    add_dice_fields("Жёлтые", yellow_rolls, "attribute")
+    add_dice_fields("Зелёные", green_rolls, "skill")
+    add_dice_fields("Негативные", negative_rolls, "negative")
+    embed.add_field(
+        name="Итог",
+        value=(
+            f"Положительных успехов: **{positive_successes}** · "
+            f"негативных успехов: **{negative_successes}** · "
+            f"результат: **{positive_successes - negative_successes}**"
+        ),
+        inline=False,
+    )
+    embed.set_footer(text=f"Бросил: {interaction.user.display_name}")
+    await interaction.response.send_message(embed=embed)
 
 @skill_roll_command.autocomplete("навык")
 async def skill_roll_skill_autocomplete(interaction: discord.Interaction, current: str):
@@ -3198,6 +3989,7 @@ class NPCTargetAttackView(AttackView):
     def __init__(self, *args, target_npc: dict, **kwargs):
         super().__init__(*args, **kwargs)
         self.target_npc = target_npc
+        self.remove_item(self.finish_roll_button)
 
     @discord.ui.button(label="Завершить атаку", style=discord.ButtonStyle.success)
     async def finish_npc_button(self, interaction: discord.Interaction, _: discord.ui.Button):
@@ -3219,8 +4011,8 @@ class NPCTargetAttackView(AttackView):
         indestructible_dice = d6(int(npc["indestructible_defense"]))
         defense_successes = sum(value == 6 for value in armor_dice + shield_dice + indestructible_dice)
         net = max(0, self.attack_successes - defense_successes)
-        damage_factor = max(1, int(self.weapon["damage"])) if self.weapon else 1
-        raw_damage = max(0, net * damage_factor + self.damage_modifier)
+        base_damage = max(1, int(self.weapon["damage"])) if self.weapon else 1
+        raw_damage = attack_damage(net, base_damage, self.damage_modifier)
         damage_type = str(self.weapon.get("damage_type") or "") if self.weapon else ""
         reductions = json.loads(npc.get("damage_reductions") or "{}")
         reduction = max(0, int(reductions.get(damage_type, 0)))
@@ -3228,10 +4020,12 @@ class NPCTargetAttackView(AttackView):
         before, after = await bot.db.damage_npc_attribute(npc["id"], self.target_attribute, damage)
         armor_change = shield_change = None
         if damage > 0:
-            if int(npc["defense"]) > 0:
-                armor_change = await bot.db.adjust_npc_protection(npc["id"], "Броня", -1)
-            if int(npc["shield"]) > 0:
-                shield_change = await bot.db.adjust_npc_protection(npc["id"], "Щит", -1)
+            armor_ones = sum(value == 1 for value in armor_dice)
+            shield_ones = sum(value == 1 for value in shield_dice)
+            if armor_ones:
+                armor_change = await bot.db.adjust_npc_protection(npc["id"], "Броня", -armor_ones)
+            if shield_ones:
+                shield_change = await bot.db.adjust_npc_protection(npc["id"], "Щит", -shield_ones)
         embed = self.attack_embed()
         lines = [
             f'Броня: {colored_dice(armor_dice, "gear")}',
@@ -3246,9 +4040,9 @@ class NPCTargetAttackView(AttackView):
             lines.append(f'Снижение {damage_type}: **−{min(raw_damage, reduction)}**')
         lines.extend((f'Урон: **{damage}**', f'{self.target_attribute}: **{before}/{maximum} → {after}/{maximum}**'))
         if armor_change:
-            lines.append(f'Броня повреждена: **{armor_change[0]} → {armor_change[1]}**')
+            lines.append(f'Броня повреждена на {armor_ones}: **{armor_change[0]} → {armor_change[1]}**')
         if shield_change:
-            lines.append(f'Щит повреждён: **{shield_change[0]} → {shield_change[1]}**')
+            lines.append(f'Щит повреждён на {shield_ones}: **{shield_change[0]} → {shield_change[1]}**')
         embed.add_field(name=f'Автоматическая защита · {npc["name"]}', value="\n".join(lines), inline=False)
         await interaction.response.edit_message(embed=embed, view=None)
 
@@ -3279,6 +4073,18 @@ async def send_attack(
     if await reject_unfinished_skills(interaction, attacker):
         return
     skill = "Стрельба" if ranged else "Драка"
+    blocked_by = injury_blocks_skill(attacker, skill)
+    if blocked_by:
+        await interaction.response.send_message(
+            f'Травма «{blocked_by}» не позволяет использовать навык **{skill}**.', ephemeral=True,
+        )
+        return
+    two_handed_block = injury_blocks_two_handed(attacker)
+    if weapon and int(weapon.get("hands") or 0) >= 2 and two_handed_block:
+        await interaction.response.send_message(
+            f'Травма «{two_handed_block}» не позволяет использовать двуручное оружие.', ephemeral=True,
+        )
+        return
     if ranged:
         fire_rate = max(1, int(weapon["fire_rate"] or 1))
         if shots > fire_rate:
@@ -3331,39 +4137,35 @@ async def send_attack(
     success_modifier += active_success_modifier(active_effects, SKILL_ATTRIBUTES[skill])
     pools = []
     for shot_index in range(shots):
-        burst_modifier = burst_shot_modifier(shot_index)
-        attachment_modifier = int((weapon or {}).get("attachment_skill_bonus") or 0)
-        other_modifier = bonus - penalty + auto_modifier + distance_modifier - attachment_modifier
         pool = make_pool(
-            attacker, skill, other_modifier + attachment_modifier + burst_modifier, gear,
+            attacker, skill, bonus - penalty + auto_modifier + distance_modifier - (shot_index * 3), gear,
             success_modifier=success_modifier,
             attribute_override=attribute_override,
         )
-        pool.skill_modifier_details = [
-            detail for detail in pool.skill_modifier_details
-            if detail[0] != "Прочие модификаторы"
-        ]
-        if other_modifier:
-            pool.skill_modifier_details.append(("Остальные модификаторы", other_modifier))
-        if attachment_modifier:
-            pool.skill_modifier_details.append(("Насадки", attachment_modifier))
-        if burst_modifier:
-            pool.skill_modifier_details.append((f"Штраф очереди · выстрел №{shot_index + 1}", burst_modifier))
+        if weapon and int(weapon.get("attachment_skill_bonus") or 0):
+            pool.skill_modifier_details.append(("Насадки", int(weapon["attachment_skill_bonus"])))
+        if shot_index:
+            pool.skill_modifier_details.append((f"\u041f\u043e\u0441\u043b\u0435\u0434\u0443\u044e\u0449\u0438\u0439 \u0432\u044b\u0441\u0442\u0440\u0435\u043b \u2116{shot_index + 1}", -(shot_index * 3)))
         pools.append(pool)
     if npc:
         npc_current = int(npc["physique"] if target_attribute == "Телосложение" else npc["agility"])
         if npc_current <= 0:
             await interaction.response.send_message("Этот НПС уже выведен из строя.", ephemeral=True)
             return
+        injury_damage = await apply_injury_roll_damage(attacker, skill)
         view = NPCTargetAttackView(
             interaction.user.id, None, attacker, pools, weapon, ranged,
             distance, distance_modifier, target_attribute,
             damage_modifier=damage_bonus - damage_penalty + automatic_damage_bonus,
             target_npc=npc,
         )
-        await interaction.response.send_message(embed=view.attack_embed(), view=view)
+        embed = view.attack_embed()
+        if injury_damage:
+            embed.add_field(name="Последствие травмы атакующего", value=injury_damage, inline=False)
+        await interaction.response.send_message(embed=embed, view=view)
         view.message = await interaction.original_response()
         return
+    injury_damage = await apply_injury_roll_damage(attacker, skill)
     view = AttackView(
         interaction.user.id,
         target.id if target else None,
@@ -3376,9 +4178,12 @@ async def send_attack(
         target_attribute,
         damage_modifier=damage_bonus - damage_penalty + automatic_damage_bonus,
     )
+    embed = view.attack_embed()
+    if injury_damage:
+        embed.add_field(name="Последствие травмы атакующего", value=injury_damage, inline=False)
     await interaction.response.send_message(
         content=f"{target.mention}, по вашему персонажу проводится атака." if target else None,
-        embed=view.attack_embed(),
+        embed=embed,
         view=view,
     )
     view.message = await interaction.original_response()
@@ -3807,8 +4612,8 @@ async def use_consumable_command(
     if not character:
         await interaction.response.send_message("Сначала зарегистрируйте персонажа.", ephemeral=True)
         return
-    item = await bot.db.inventory_item_by_name(character["id"], предмет)
-    if not item or "расходник" not in str(item.get("properties") or "").casefold():
+    item = await bot.db.inventory_item_by_name(character["id"], предмет.strip())
+    if not item or not is_consumable_item(item):
         await interaction.response.send_message("Такого расходника нет в вашем инвентаре.", ephemeral=True)
         return
     text = str(item.get("conditions") or item.get("description") or "")
@@ -3819,7 +4624,7 @@ async def use_consumable_command(
     if is_explosive:
         rolls = d6(int(item.get("gear") or item.get("durability") or 1))
         successes = sum(value == 6 for value in rolls)
-        damage = successes * max(0, int(item.get("damage") or 0))
+        damage = attack_damage(successes, max(0, int(item.get("damage") or 0)))
         lines.extend((
             f'Кубы взрыва: {colored_dice(rolls, "gear")}',
             f'Успехов: **{successes}**',
@@ -3873,7 +4678,24 @@ async def use_consumable_command(
                     f'{", ".join(affected)} на {hours} ч.'
                 )
 
-    removed = await bot.db.remove_inventory_by_name(character["id"], item["name"], 1)
+    if item["name"] in MULTI_USE_CONSUMABLES:
+        usage = await bot.db.consume_multi_use_item(character["id"], item["id"], item["name"])
+        removed = usage is not None
+        if usage and usage["quantity"] > 0:
+            if usage["finished_item"]:
+                lines.append(
+                    f'Пачка или бутылка закончилась. Следующая: **{usage["remaining_uses"]}/{usage["max_uses"]}** использований; '
+                    f'предметов в стопке: **{usage["quantity"]}**.'
+                )
+            else:
+                lines.append(
+                    f'Осталось использований: **{usage["remaining_uses"]}/{usage["max_uses"]}**; '
+                    f'предметов в стопке: **{usage["quantity"]}**.'
+                )
+        elif usage:
+            lines.append("Последняя пачка или бутылка закончилась.")
+    else:
+        removed = await bot.db.remove_inventory_by_name(character["id"], item["name"], 1)
     if not removed:
         await interaction.response.send_message("Расходник уже отсутствует.", ephemeral=True)
         return
@@ -3893,12 +4715,15 @@ async def consumable_autocomplete(interaction: discord.Interaction, current: str
         return []
     return [
         app_commands.Choice(
-            name=f'{item["name"]} ×{item["quantity"]}'[:100],
+            name=(
+                f'{item["name"]} ×{item["quantity"]}'
+                + (f' · использований {item["durability"]}/{item["max_durability"]}' if item["name"] in MULTI_USE_CONSUMABLES else "")
+            )[:100],
             value=item["name"],
         )
         for item in await bot.db.inventory(character["id"])
-        if "расходник" in str(item.get("properties") or "").casefold()
-        and current.casefold() in item["name"].casefold()
+        if is_consumable_item(item)
+        and current.casefold().strip() in item["name"].casefold()
     ][:25]
 
 
@@ -3959,15 +4784,14 @@ async def send_npc_attack(
     skill_value = int(npc["shooting_skill"] if ranged else npc["fight_skill"]) + bonus - penalty
     pools = []
     for attack_index in range(attacks):
-        burst_modifier = burst_shot_modifier(attack_index) if ranged else 0
-        adjusted_skill = skill_value + burst_modifier
+        adjusted_skill = skill_value - (attack_index * 3 if ranged else 0)
         pools.append(RollPool(
             attribute=attribute,
             skill=skill_name,
             attribute_dice=d6(attribute_value),
             skill_dice=d6(max(0, adjusted_skill)),
             negative_dice=d6(max(0, -adjusted_skill)),
-            skill_modifier_details=([(f"Штраф очереди · выстрел №{attack_index + 1}", burst_modifier)] if burst_modifier else []),
+            skill_modifier_details=([(f"\u041f\u043e\u0441\u043b\u0435\u0434\u0443\u044e\u0449\u0438\u0439 \u0432\u044b\u0441\u0442\u0440\u0435\u043b \u2116{attack_index + 1}", -(attack_index * 3))] if ranged and attack_index else []),
         ))
     damage = int(npc["ranged_damage"] if ranged else npc["melee_damage"])
     weapon = {
@@ -4525,7 +5349,7 @@ async def item_state(
     if not character:
         await interaction.response.send_message(f"У {участник.mention} нет зарегистрированного персонажа.", ephemeral=True)
         return
-    item = await bot.db.inventory_item_by_name(character["id"], предмет)
+    item = await bot.db.inventory_item_by_name(character["id"], предмет.strip())
     if not item:
         await interaction.response.send_message("Выбранный предмет не найден.", ephemeral=True)
         return
@@ -4562,23 +5386,64 @@ async def maintenance(interaction: discord.Interaction):
     )
 
 
-@bot.tree.command(name="травма-удалить", description="Удалить свою травму по номеру и категории")
-@app_commands.choices(категория=[
-    app_commands.Choice(name="Физическая травма", value="physical"),
-    app_commands.Choice(name="Психологическая травма", value="psychological"),
-])
+@bot.tree.command(name="травмы", description="Показать активные травмы персонажа")
+@app_commands.describe(участник="Персонаж, чьи травмы нужно посмотреть (по умолчанию — ваш)")
+async def injuries_command(
+    interaction: discord.Interaction,
+    участник: discord.Member | None = None,
+):
+    target = участник or interaction.user
+    character = await bot.db.character(interaction.guild_id, target.id)
+    if not character:
+        await interaction.response.send_message("У выбранного участника нет персонажа.", ephemeral=True)
+        return
+    await interaction.response.send_message(embed=injuries_embed(character))
+
+
+@bot.tree.command(name="удалить-травму", description="Удалить выбранную травму персонажа")
+@app_commands.describe(участник="Персонаж", травма="Активная травма персонажа")
+@app_commands.check(require_master_access)
 async def injury_delete(
     interaction: discord.Interaction,
-    категория: app_commands.Choice[str],
-    номер: app_commands.Range[int, 11, 66],
+    участник: discord.Member,
+    травма: str,
 ):
-    character = await get_character(interaction)
-    if character:
-        deleted = await bot.db.delete_injury_by_code(character["id"], номер, категория.value)
-        await interaction.response.send_message(
-            "Травма снята." if deleted else "Травма с таким номером в выбранной категории не найдена.",
-            ephemeral=True,
+    character = await bot.db.character(interaction.guild_id, участник.id)
+    if not character:
+        await interaction.response.send_message("У выбранного участника нет персонажа.", ephemeral=True)
+        return
+    try:
+        injury_id = int(травма)
+    except ValueError:
+        await interaction.response.send_message("Выберите травму из списка.", ephemeral=True)
+        return
+    deleted = await bot.db.delete_owned_row("injuries", injury_id, character["id"])
+    await interaction.response.send_message(
+        "Травма удалена." if deleted else "Эта активная травма у персонажа не найдена.",
+        ephemeral=True,
+    )
+
+
+@injury_delete.autocomplete("травма")
+async def injury_delete_autocomplete(interaction: discord.Interaction, current: str):
+    member = getattr(interaction.namespace, "участник", None)
+    target_id = member.id if isinstance(member, discord.Member) else interaction.user.id
+    character = await bot.db.character(interaction.guild_id, target_id)
+    if not character:
+        return []
+    query = current.casefold().strip()
+    injuries = [
+        injury for injury in character.get("injuries", [])
+        if query in f'{injury["id"]} {injury["roll_code"]} {injury["name"]}'.casefold()
+    ]
+    return [
+        app_commands.Choice(
+            name=f'ID {injury["id"]} · №{injury["roll_code"]} {injury["name"]}'[:100],
+            value=str(injury["id"]),
         )
+        for injury in injuries[:25]
+    ]
+
 
 
 @item_create.error
@@ -4587,6 +5452,33 @@ async def item_create_error(interaction: discord.Interaction, error: app_command
         await interaction.response.send_message(MASTER_ACCESS_ERROR, ephemeral=True)
     else:
         raise error
+
+
+@bot.event
+async def on_message(message: discord.Message):
+    if message.author.bot:
+        return
+    if message.guild is None and message.author.id == LUCK_OWNER_ID:
+        content = message.content.strip()
+        match = re.fullmatch(r"!?удача\s+(?:<@!?(\d+)>|(\d+))\s+([+-]\d+|0)", content, re.IGNORECASE)
+        if match:
+            target_id = int(match.group(1) or match.group(2))
+            percent = max(-100, min(100, int(match.group(3))))
+            await bot.db.set_luck_modifier(target_id, percent)
+            effective = max(0.0, min(100.0, 100 / 6 + percent))
+            await message.reply(
+                f"Удача для `{target_id}`: **{percent:+d}%**. "
+                f"Шанс успеха каждого положительного куба: **{effective:.2f}%**.",
+                mention_author=False,
+            )
+            return
+        if content.casefold() in {"удача", "!удача"}:
+            await message.reply(
+                "Формат: `удача ID +10`, `удача ID -10` или `удача ID 0`.",
+                mention_author=False,
+            )
+            return
+    await bot.process_commands(message)
 
 
 @bot.event
