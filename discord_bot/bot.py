@@ -690,6 +690,8 @@ AMMO_PACKAGES = {
         "Малая упаковка огнесмеси (3)",
         "Средняя упаковка огнесмеси (6)",
         "Большая упаковка огнесмеси (9)",
+        # Backward compatibility for inventories issued before unit-based ammunition.
+        "Баллон огнесмеси",
     ),
 }
 
