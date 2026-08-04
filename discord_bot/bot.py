@@ -3996,56 +3996,72 @@ class NPCTargetAttackView(AttackView):
         if self.resolved or interaction.user.id != self.attacker_id:
             await interaction.response.send_message("Завершить атаку может только атакующий.", ephemeral=True)
             return
-        self.resolved = True
-        npc = await bot.db.npc(interaction.guild_id, self.target_npc["name"])
-        if not npc:
-            await interaction.response.send_message("Выбранный НПС больше не существует.", ephemeral=True)
-            return
-        current = int(npc["physique"] if self.target_attribute == "Телосложение" else npc["agility"])
-        maximum = int(npc["physique_max"] if self.target_attribute == "Телосложение" else npc["agility_max"])
-        if current <= 0:
-            await interaction.response.send_message("Этот НПС уже выведен из строя.", ephemeral=True)
-            return
-        armor_dice = d6(int(npc["defense"]))
-        shield_dice = d6(int(npc["shield"]))
-        indestructible_dice = d6(int(npc["indestructible_defense"]))
-        defense_successes = sum(value == 6 for value in armor_dice + shield_dice + indestructible_dice)
-        net = max(0, self.attack_successes - defense_successes)
-        base_damage = max(1, int(self.weapon["damage"])) if self.weapon else 1
-        raw_damage = attack_damage(net, base_damage, self.damage_modifier)
-        damage_type = str(self.weapon.get("damage_type") or "") if self.weapon else ""
-        reductions = json.loads(npc.get("damage_reductions") or "{}")
-        reduction = max(0, int(reductions.get(damage_type, 0)))
-        damage = max(0, raw_damage - reduction)
-        before, after = await bot.db.damage_npc_attribute(npc["id"], self.target_attribute, damage)
-        armor_change = shield_change = None
-        if damage > 0:
-            armor_ones = sum(value == 1 for value in armor_dice)
-            shield_ones = sum(value == 1 for value in shield_dice)
-            if armor_ones:
-                armor_change = await bot.db.adjust_npc_protection(npc["id"], "Броня", -armor_ones)
-            if shield_ones:
-                shield_change = await bot.db.adjust_npc_protection(npc["id"], "Щит", -shield_ones)
-        embed = self.attack_embed()
-        lines = [
-            f'Броня: {colored_dice(armor_dice, "gear")}',
-            f'Щит: {colored_dice(shield_dice, "gear")}',
-            f'Неразрушимая защита: {colored_dice(indestructible_dice, "gear")}',
-            f'Успехов защиты: **{defense_successes}**',
-            f'Незаблокированных успехов: **{net}**',
-        ]
-        if self.damage_modifier:
-            lines.append(f'Модификатор урона: **{self.damage_modifier:+d}**')
-        if reduction:
-            lines.append(f'Снижение {damage_type}: **−{min(raw_damage, reduction)}**')
-        lines.extend((f'Урон: **{damage}**', f'{self.target_attribute}: **{before}/{maximum} → {after}/{maximum}**'))
-        if armor_change:
-            lines.append(f'Броня повреждена на {armor_ones}: **{armor_change[0]} → {armor_change[1]}**')
-        if shield_change:
-            lines.append(f'Щит повреждён на {shield_ones}: **{shield_change[0]} → {shield_change[1]}**')
-        embed.add_field(name=f'Автоматическая защита · {npc["name"]}', value="\n".join(lines), inline=False)
-        await interaction.response.edit_message(embed=embed, view=None)
 
+        # NPC defense touches several database rows and can exceed Discord's
+        # three-second interaction deadline. Acknowledge the click immediately.
+        await interaction.response.defer()
+        self.resolved = True
+        try:
+            npc = await bot.db.npc(interaction.guild_id, self.target_npc["name"])
+            if not npc:
+                self.resolved = False
+                await interaction.followup.send("Выбранный НПС больше не существует.", ephemeral=True)
+                return
+            current = int(npc["physique"] if self.target_attribute == "Телосложение" else npc["agility"])
+            maximum = int(npc["physique_max"] if self.target_attribute == "Телосложение" else npc["agility_max"])
+            if current <= 0:
+                self.resolved = False
+                await interaction.followup.send("Этот НПС уже выведен из строя.", ephemeral=True)
+                return
+            armor_dice = d6(int(npc["defense"]))
+            shield_dice = d6(int(npc["shield"]))
+            indestructible_dice = d6(int(npc["indestructible_defense"]))
+            defense_successes = sum(value == 6 for value in armor_dice + shield_dice + indestructible_dice)
+            net = max(0, self.attack_successes - defense_successes)
+            base_damage = max(1, int(self.weapon["damage"])) if self.weapon else 1
+            raw_damage = attack_damage(net, base_damage, self.damage_modifier)
+            damage_type = str(self.weapon.get("damage_type") or "") if self.weapon else ""
+            reductions = json.loads(npc.get("damage_reductions") or "{}")
+            reduction = max(0, int(reductions.get(damage_type, 0)))
+            damage = max(0, raw_damage - reduction)
+            damage_change = await bot.db.damage_npc_attribute(npc["id"], self.target_attribute, damage)
+            if damage_change is None:
+                raise RuntimeError("NPC disappeared while resolving attack")
+            before, after = damage_change
+            armor_change = shield_change = None
+            if damage > 0:
+                armor_ones = sum(value == 1 for value in armor_dice)
+                shield_ones = sum(value == 1 for value in shield_dice)
+                if armor_ones:
+                    armor_change = await bot.db.adjust_npc_protection(npc["id"], "Броня", -armor_ones)
+                if shield_ones:
+                    shield_change = await bot.db.adjust_npc_protection(npc["id"], "Щит", -shield_ones)
+            embed = self.attack_embed()
+            lines = [
+                f'Броня: {colored_dice(armor_dice, "gear")}',
+                f'Щит: {colored_dice(shield_dice, "gear")}',
+                f'Неразрушимая защита: {colored_dice(indestructible_dice, "gear")}',
+                f'Успехов защиты: **{defense_successes}**',
+                f'Незаблокированных успехов: **{net}**',
+            ]
+            if self.damage_modifier:
+                lines.append(f'Модификатор урона: **{self.damage_modifier:+d}**')
+            if reduction:
+                lines.append(f'Снижение {damage_type}: **−{min(raw_damage, reduction)}**')
+            lines.extend((f'Урон: **{damage}**', f'{self.target_attribute}: **{before}/{maximum} → {after}/{maximum}**'))
+            if armor_change:
+                lines.append(f'Броня повреждена на {armor_ones}: **{armor_change[0]} → {armor_change[1]}**')
+            if shield_change:
+                lines.append(f'Щит повреждён на {shield_ones}: **{shield_change[0]} → {shield_change[1]}**')
+            embed.add_field(name=f'Автоматическая защита · {npc["name"]}', value="\n".join(lines), inline=False)
+            await interaction.edit_original_response(embed=embed, view=None)
+        except Exception:
+            self.resolved = False
+            logging.exception("Failed to finish attack against NPC")
+            await interaction.followup.send(
+                "Не удалось завершить атаку по НПС. Ошибка записана в журнал бота.",
+                ephemeral=True,
+            )
 
 async def send_attack(
     interaction: discord.Interaction,
