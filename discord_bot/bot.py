@@ -2120,6 +2120,24 @@ class SkillRollView(discord.ui.View):
             embed.add_field(name="Цена риска", value=short("\n".join(costs)), inline=False)
         await interaction.response.edit_message(embed=embed, view=self)
 
+    @discord.ui.button(label="Завершить бросок", style=discord.ButtonStyle.success)
+    async def finish_button(self, interaction: discord.Interaction, _: discord.ui.Button):
+        if interaction.user.id != self.owner_id:
+            await interaction.response.send_message(
+                "Завершить бросок может только его владелец.", ephemeral=True
+            )
+            return
+        self.push_button.disabled = True
+        self.finish_button.disabled = True
+        embed = interaction.message.embeds[0]
+        embed.add_field(
+            name="Бросок завершён",
+            value="Игрок подтвердил отказ от дальнейшего пуша.",
+            inline=False,
+        )
+        self.stop()
+        await interaction.response.edit_message(embed=embed, view=self)
+
 
 def armor_indestructible_dice(item: dict, weapon: dict | None, distance: str | None) -> int:
     text = item.get("conditions") or item.get("description") or ""
@@ -2766,40 +2784,11 @@ async def rank_command(interaction: discord.Interaction, участник: disco
 @app_commands.check(require_master_access)
 async def damage_command(
     interaction: discord.Interaction,
+    участник: discord.Member,
     характеристика: app_commands.Choice[str],
     действие: app_commands.Choice[str],
     количество: app_commands.Range[int, 1, 20],
-    участник: discord.Member | None = None,
-    нпс: str | None = None,
 ):
-    if bool(участник) == bool(нпс):
-        await interaction.response.send_message("Выберите либо участника, либо НПС.", ephemeral=True)
-        return
-    if нпс:
-        npc = await bot.db.npc(interaction.guild_id, нпс)
-        if not npc:
-            await interaction.response.send_message("НПС не найден.", ephemeral=True)
-            return
-        if характеристика.value not in {"Телосложение", "Ловкость"}:
-            await interaction.response.send_message(
-                "У НПС сейчас доступны только Телосложение и Ловкость.",
-                ephemeral=True,
-            )
-            return
-        if действие.value == "add":
-            before, after = await bot.db.heal_npc_attribute(
-                npc["id"], характеристика.value, количество
-            )
-        else:
-            before, after = await bot.db.damage_npc_attribute(
-                npc["id"], характеристика.value, количество
-            )
-        maximum = npc["physique_max"] if характеристика.value == "Телосложение" else npc["agility_max"]
-        await interaction.response.send_message(
-            f'НПС **{npc["name"]}** · {характеристика.value}: '
-            f'**{before}/{maximum} → {after}/{maximum}**.'
-        )
-        return
     character = await bot.db.character(interaction.guild_id, участник.id)
     if not character:
         await interaction.response.send_message("У выбранного участника нет зарегистрированного персонажа.", ephemeral=True)
@@ -2813,13 +2802,51 @@ async def damage_command(
     await interaction.response.send_message(f'{участник.mention}\n{message}')
 
 
-@damage_command.autocomplete("нпс")
+@bot.tree.command(name="урон-лечение-нпс", description="Прибавить или убавить пункты характеристики НПС")
+@app_commands.describe(
+    нпс="Выберите НПС",
+    характеристика="Выберите характеристику",
+    действие="Прибавить или убавить пункты",
+    количество="Количество пунктов",
+)
+@app_commands.choices(характеристика=[
+    app_commands.Choice(name="Телосложение", value="Телосложение"),
+    app_commands.Choice(name="Ловкость", value="Ловкость"),
+])
+@app_commands.choices(действие=[
+    app_commands.Choice(name="Прибавить (+)", value="add"),
+    app_commands.Choice(name="Убавить (−)", value="subtract"),
+])
+@app_commands.check(require_master_access)
+async def damage_npc_command(
+    interaction: discord.Interaction,
+    нпс: str,
+    характеристика: app_commands.Choice[str],
+    действие: app_commands.Choice[str],
+    количество: app_commands.Range[int, 1, 20],
+):
+    npc = await bot.db.npc(interaction.guild_id, нпс)
+    if not npc:
+        await interaction.response.send_message("НПС не найден.", ephemeral=True)
+        return
+    if действие.value == "add":
+        before, after = await bot.db.heal_npc_attribute(npc["id"], характеристика.value, количество)
+    else:
+        before, after = await bot.db.damage_npc_attribute(npc["id"], характеристика.value, количество)
+    maximum = npc["physique_max"] if характеристика.value == "Телосложение" else npc["agility_max"]
+    await interaction.response.send_message(
+        f'НПС **{npc["name"]}** · {характеристика.value}: **{before}/{maximum} → {after}/{maximum}**.'
+    )
+
+
+@damage_npc_command.autocomplete("нпс")
 async def damage_npc_autocomplete(interaction: discord.Interaction, current: str):
     return await npc_choices(interaction, current)
 
 
 @rank_command.error
 @damage_command.error
+@damage_npc_command.error
 async def master_command_error(interaction: discord.Interaction, error: app_commands.AppCommandError):
     if isinstance(error, (MasterAccessRequired, app_commands.MissingPermissions)):
         await interaction.response.send_message(MASTER_ACCESS_ERROR, ephemeral=True)
