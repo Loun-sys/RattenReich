@@ -17,6 +17,47 @@ REMOVED_SOURCE_NUMBERS = {55, 56, 58, 60}
 
 SUPPLY_LEVELS = ("I", "II", "III", "IV", "V")
 
+MEDICAL_CONSUMABLES = {
+    "Полевые бинты",
+    "Индивидуальный перевязочный пакет",
+    "Армейская аптечка",
+    "Набор полевого санитара",
+    "Нейростимулятор",
+    "Успокоительный автоинъектор",
+}
+
+
+MULTI_USE_CONSUMABLES = {
+    "Сигареты «Фельдграу»": 3,
+    "Сигареты «Штальраух»": 2,
+    "Папиросы «Кайзеркроне»": 2,
+    "Шнапс «Айзернер Гренадир»": 2,
+    "Горькая «Рейхсмарш»": 3,
+    "Бренди «Кайзерблут»": 2,
+}
+
+_CONSUMABLE_NAMES = {name.casefold() for name in MEDICAL_CONSUMABLES | set(MULTI_USE_CONSUMABLES)}
+
+
+def is_consumable_item(item: dict[str, Any]) -> bool:
+    """Recognize current and legacy consumables even when their stored flag is missing."""
+    name = str(item.get("name") or "").strip().casefold()
+    if name in _CONSUMABLE_NAMES:
+        return True
+    text = " ".join(
+        str(item.get(key) or "") for key in ("properties", "conditions", "description")
+    ).casefold()
+    return (
+        "расходник" in text
+        or "одноразов" in text
+        or ("восстанавлива" in text and "пункт" in text)
+    )
+
+def catalog_price_increase(price: int) -> int:
+    if price <= 0:
+        return 0
+    return 2 if price >= 10 else 1
+
 REDUCED_BASE_PRICES = {
     "Общедоступное": 4,
     "Снабжение I": 5,
@@ -134,8 +175,31 @@ def _protection_price(item: dict[str, Any]) -> int:
     return max(3, base + max(-2, min(4, adjustment)))
 
 
+_ACCESS_TEXT_RE = re.compile(
+    "(?P<label>\\u0434\\u043e\\u043f\\u0443\\u0441\\u043a\\s*:\\s*)(?:\\u043e\\u0431\\u0449\\u0435\\u0434\\u043e\\u0441\\u0442\\u0443\\u043f\\u043d\\u043e\\u0435|\\u043d\\u0435 \\u043f\\u0440\\u043e\\u0434\\u0430[\\u0435\\u0451]\\u0442\\u0441\\u044f|\\u0441\\u043d\\u0430\\u0431\\u0436\\u0435\\u043d\\u0438\\u0435\\s+(?:III|IV|II|V|I))",
+    re.IGNORECASE,
+)
+
+
+def _synchronize_access_text(item: dict[str, Any]) -> None:
+    access = str(item.get("access") or "\u041e\u0431\u0449\u0435\u0434\u043e\u0441\u0442\u0443\u043f\u043d\u043e\u0435")
+    for key in ("description", "conditions", "properties"):
+        value = str(item.get(key) or "")
+        if value:
+            item[key] = _ACCESS_TEXT_RE.sub(
+                lambda match: f'{match.group("label")}{access}',
+                value,
+            )
+
 def _balance_item(item: dict[str, Any]) -> dict[str, Any]:
     category = str(item.get("category") or "")
+    uses = MULTI_USE_CONSUMABLES.get(str(item.get("name") or ""))
+    if uses:
+        item["max_durability"] = uses
+        usage_text = f"Использований: {uses}."
+        if usage_text not in str(item.get("conditions") or ""):
+            item["conditions"] = f'{usage_text} {item.get("conditions") or ""}'.strip()
+            item["description"] = item["conditions"]
     if category.startswith("Оружие "):
         item["access"] = _weapon_access(item)
     elif category == "Броня":
@@ -153,6 +217,9 @@ def _balance_item(item: dict[str, Any]) -> dict[str, Any]:
         item["price"] = _weapon_price(item)
     elif category in {"Броня", "Щит"}:
         item["price"] = _protection_price(item)
+    if str(item.get("name") or "") not in MEDICAL_CONSUMABLES:
+        item["price"] = int(item.get("price") or 0) + catalog_price_increase(int(item.get("price") or 0))
+    _synchronize_access_text(item)
     return item
 
 
