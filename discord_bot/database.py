@@ -382,8 +382,36 @@ class Database:
         await self.reload_base_catalog()
         await self.migrate_ammo_packages()
         await self.repair_ammo_package_contents()
+        await self.repair_regressed_flame_ammo()
         await self.merge_stackable_inventory()
         await self.split_nonstackable_inventory()
+
+    async def repair_regressed_flame_ammo(self) -> int:
+        """Восстанавливает заряды баллонов, повторно появившихся из старого каталога."""
+        repaired = 0
+        async with self.connect() as db:
+            done = await db.execute_fetchall(
+                "SELECT value FROM app_meta WHERE key='repair_flame_ammo_catalog_regression_v1'"
+            )
+            if done:
+                return 0
+            rows = await db.execute_fetchall(
+                """SELECT inventory.id,inventory.ammo,item_catalog.ammo_max
+                   FROM inventory JOIN item_catalog ON item_catalog.id=inventory.item_id
+                   WHERE item_catalog.source_number=520
+                     AND (inventory.ammo IS NULL OR inventory.ammo<=0)"""
+            )
+            for row in rows:
+                # The removed legacy balloon contained three charges. Preserve that
+                # amount when converting it into the six-charge medium package.
+                restored = min(3, max(1, int(row["ammo_max"] or 6)))
+                await db.execute("UPDATE inventory SET ammo=? WHERE id=?", (restored, row["id"]))
+                repaired += 1
+            await db.execute(
+                "INSERT OR REPLACE INTO app_meta(key,value) VALUES('repair_flame_ammo_catalog_regression_v1','done')"
+            )
+            await db.commit()
+        return repaired
 
     async def repair_ammo_package_contents(self) -> int:
         """Одноразово наполняет упаковки, созданные из старых комплектов."""
