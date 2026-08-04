@@ -535,10 +535,14 @@ class Database:
         async with self.connect() as db:
             active_numbers = [int(item["source_number"]) for item in items]
             placeholders = ",".join("?" for _ in active_numbers)
+            # Never cascade-delete issued or warehoused items during catalog sync.
+            # Missing source entries remain usable by their owners and can be restored to the catalog later.
             await db.execute(
                 f"""DELETE FROM item_catalog
                     WHERE guild_id=0 AND source_number IS NOT NULL
-                    AND source_number NOT IN ({placeholders})""",
+                    AND source_number NOT IN ({placeholders})
+                    AND NOT EXISTS (SELECT 1 FROM inventory i WHERE i.item_id=item_catalog.id)
+                    AND NOT EXISTS (SELECT 1 FROM supply_warehouse sw WHERE sw.item_id=item_catalog.id)""",
                 active_numbers,
             )
             for item in items:
@@ -606,6 +610,45 @@ class Database:
                     "UPDATE item_catalog SET price=? WHERE lower(name)=lower(?)",
                     (override["price"], override["name"]),
                 )
+
+            # Гарнитура №334 was temporarily omitted from the source catalog. The old
+            # hard-delete removed its inventory rows through ON DELETE CASCADE. Relink
+            # old orders and restore purchased copies once, without duplicating items.
+            headset_rows = await db.execute_fetchall(
+                "SELECT id,max_durability FROM item_catalog WHERE guild_id=0 AND source_number=334"
+            )
+            if headset_rows:
+                headset_id = int(headset_rows[0]["id"])
+                headset_durability = int(headset_rows[0]["max_durability"])
+                await db.execute(
+                    "UPDATE purchase_orders SET item_id=? WHERE lower(item_name)=lower('Гарнитура')",
+                    (headset_id,),
+                )
+                recovery_done = await db.execute_fetchall(
+                    "SELECT value FROM app_meta WHERE key='restore_headset_334_v1'"
+                )
+                if not recovery_done:
+                    purchased = await db.execute_fetchall(
+                        """SELECT character_id,COUNT(*) AS quantity
+                           FROM purchase_orders
+                           WHERE lower(item_name)=lower('Гарнитура') AND status='approved'
+                           GROUP BY character_id"""
+                    )
+                    for purchase in purchased:
+                        owned = await db.execute_fetchall(
+                            "SELECT COALESCE(SUM(quantity),0) AS quantity FROM inventory WHERE character_id=? AND item_id=?",
+                            (purchase["character_id"], headset_id),
+                        )
+                        missing = max(0, int(purchase["quantity"]) - int(owned[0]["quantity"]))
+                        if missing:
+                            await db.execute(
+                                """INSERT INTO inventory(character_id,item_id,durability,ammo,quantity,equipped)
+                                   VALUES(?,?,?,NULL,?,0)""",
+                                (purchase["character_id"], headset_id, headset_durability, missing),
+                            )
+                    await db.execute(
+                        "INSERT OR REPLACE INTO app_meta(key,value) VALUES('restore_headset_334_v1','done')"
+                    )
             await db.commit()
         return len(items)
 
