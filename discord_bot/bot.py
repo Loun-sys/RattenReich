@@ -4336,6 +4336,18 @@ async def ranged_attack(
     if not weapon or weapon["category"] != "Оружие дальнего боя" or weapon["durability"] <= 0:
         await interaction.response.send_message("Выберите исправное экипированное оружие дальнего боя.", ephemeral=True)
         return
+    range_order = ("Нулевая", "Ближняя", "Средняя", "Дальняя")
+    weapon_range = str(weapon.get("use_range") or "")
+    if (
+        weapon_range in range_order
+        and дистанция.value in range_order
+        and range_order.index(дистанция.value) > range_order.index(weapon_range)
+    ):
+        await interaction.response.send_message(
+            f'Предельная дистанция **{weapon["name"]}** — **{weapon_range}**.',
+            ephemeral=True,
+        )
+        return
     distance_modifier = shooting_distance_modifier(weapon, дистанция.value)
     distance_modifier = shooting_talent_distance_modifier(attacker, distance_modifier)
     if дистанция.value == "Нулевая" and talent_effect(attacker, "ignore_zero_range", False):

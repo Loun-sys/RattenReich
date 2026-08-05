@@ -131,13 +131,14 @@ ATTACHMENTS = [{'name': 'Траншейный прицел',
   'effect': 'СКР +2; Качество -2',
   'fire_rate': 2,
   'gear': -2},
- {'name': 'Оптический прицел ×2',
+ {'name': 'Оптический прицел X4',
   'slot': 'Прицел',
-  'kinds': 'Винтовка,Пулемёт',
-  'price': 16,
+  'kinds': 'Винтовка',
+  'price': 18,
   'access': 'Общедоступное',
-  'effect': 'Кубы Стрельбы +2',
-  'skill': 2},
+  'effect': 'Предельная дистанция +1. Если оружие уже имеет максимальную дальность, урон +1.',
+  'range': 1,
+  'max_range_damage': 1},
  {'name': 'Складной штык',
   'slot': 'Ствол',
   'kinds': 'Винтовка,Дробовик',
@@ -183,7 +184,19 @@ def apply_attachments(weapon, specs):
     result = dict(weapon)
     result["attachments"] = [spec["name"] for spec in specs]
     result["attachment_skill_bonus"] = sum(int(spec.get("skill") or 0) for spec in specs)
-    result["damage"] = max(0, int(result.get("damage") or 0) + sum(int(spec.get("damage") or 0) for spec in specs))
+    maximum_range_damage = sum(int(spec.get("max_range_damage") or 0) for spec in specs)
+    maximum_range_bonus = (
+        maximum_range_damage
+        if result.get("use_range") == RANGE_ORDER[-1]
+        else 0
+    )
+    result["attachment_max_range_damage_bonus"] = maximum_range_bonus
+    result["damage"] = max(
+        0,
+        int(result.get("damage") or 0)
+        + sum(int(spec.get("damage") or 0) for spec in specs)
+        + maximum_range_bonus,
+    )
     result["fire_rate"] = max(1, int(result.get("fire_rate") or 1) + sum(int(spec.get("fire_rate") or 0) for spec in specs))
     if result.get("ammo_max") is not None:
         result["ammo_max"] = max(1, int(result["ammo_max"]) + sum(int(spec.get("ammo") or 0) for spec in specs))

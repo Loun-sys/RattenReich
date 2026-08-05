@@ -380,11 +380,52 @@ class Database:
                 )
             await db.commit()
         await self.reload_base_catalog()
+        await self.migrate_legacy_optical_sights()
         await self.migrate_ammo_packages()
         await self.repair_ammo_package_contents()
         await self.repair_regressed_flame_ammo()
         await self.merge_stackable_inventory()
         await self.split_nonstackable_inventory()
+
+    async def migrate_legacy_optical_sights(self) -> int:
+        """Переносит ошибочный предмет №65 в настоящую винтовочную насадку."""
+        migration_key = "legacy_optical_sight_to_attachment_v1"
+        async with self.connect() as db:
+            applied = await db.execute_fetchall(
+                "SELECT 1 FROM app_migrations WHERE key=?",
+                (migration_key,),
+            )
+            if applied:
+                return 0
+            target_rows = await db.execute_fetchall(
+                """SELECT id FROM item_catalog
+                   WHERE guild_id=0 AND name='Оптический прицел X4' AND category='Насадка'"""
+            )
+            legacy_rows = await db.execute_fetchall(
+                "SELECT id FROM item_catalog WHERE guild_id=0 AND source_number=65"
+            )
+            if not target_rows or not legacy_rows:
+                return 0
+            target_id = int(target_rows[0]["id"])
+            legacy_id = int(legacy_rows[0]["id"])
+            cursor = await db.execute(
+                "UPDATE inventory SET item_id=?,equipped=0 WHERE item_id=?",
+                (target_id, legacy_id),
+            )
+            await db.execute(
+                "UPDATE supply_warehouse SET item_id=? WHERE item_id=?",
+                (target_id, legacy_id),
+            )
+            await db.execute(
+                """UPDATE purchase_orders SET item_id=?,item_name='Оптический прицел X4'
+                   WHERE item_id=?
+                      OR lower(item_name)=lower('Оптический прицел')
+                      OR lower(item_name)=lower('Оптический прицел ×2')""",
+                (target_id, legacy_id),
+            )
+            await db.execute("INSERT INTO app_migrations(key) VALUES(?)", (migration_key,))
+            await db.commit()
+            return cursor.rowcount
 
     async def repair_regressed_flame_ammo(self) -> int:
         """Восстанавливает заряды баллонов, повторно появившихся из старого каталога."""
