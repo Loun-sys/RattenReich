@@ -20,7 +20,7 @@ from dotenv import load_dotenv
 
 from attachment_data import ATTACHMENT_BY_NAME, compatible
 from card_renderer import CardRenderer
-from catalog_loader import MULTI_USE_CONSUMABLES, is_consumable_item
+from catalog_loader import MEDICAL_CONSUMABLES, MULTI_USE_CONSUMABLES, is_consumable_item
 from constants import ATTRIBUTES, CLASSES, ITEM_CATEGORIES, ITEM_SIZES, RACES, RANGES, RANKS, SKILLS
 from database import Database
 from trauma_data import MENTAL_TRAUMAS, PHYSICAL_TRAUMAS, SOCIAL_TRAUMAS
@@ -242,6 +242,23 @@ def talent_skill_bonus_details(character: dict, skill: str) -> list[tuple[str, i
         value = (talent or {}).get("effects", {}).get("skill_bonus", {}).get(skill, 0)
         if value:
             details.append((f'\u0422\u0430\u043b\u0430\u043d\u0442 \u00ab{name}\u00bb', int(value)))
+    return details
+
+
+def vehicle_skill_bonus_details(character: dict, skill: str) -> list[tuple[str, int]]:
+    vehicles = set(character.get("active_vehicles", ()))
+    details = []
+    if (
+        "Штабная мотокарета «Канцелярия»" in vehicles
+        and skill in set(CLASSES.values())
+    ):
+        details.append(("Автопарк · Канцелярия", 1))
+    if (
+        "Разведывательный мотоцикл «Шнырь»" in vehicles
+        and skill in SKILLS
+        and skill not in {"Стрельба", "Драка"}
+    ):
+        details.append(("Автопарк · Шнырь", 1))
     return details
 
 
@@ -581,14 +598,17 @@ def make_pool(
     race_bonus = racial_skill_bonus(character, skill)
     talent_details = talent_skill_bonus_details(character, skill)
     talent_bonus = sum(value for _, value in talent_details)
+    vehicle_details = vehicle_skill_bonus_details(character, skill)
+    vehicle_bonus = sum(value for _, value in vehicle_details)
     injury_details = injury_skill_modifier_details(character, skill)
     injury_modifier = sum(value for _, value in injury_details)
-    skill_total = permanent_skill + race_bonus + talent_bonus + injury_modifier + custom_modifier
+    skill_total = permanent_skill + race_bonus + talent_bonus + vehicle_bonus + injury_modifier + custom_modifier
     guaranteed = max(0, permanent_skill - 5) if skill in {"\u041b\u0435\u0447\u0435\u043d\u0438\u0435", "\u041e\u0431\u0440\u0430\u0449\u0435\u043d\u0438\u0435", "\u0417\u0430\u0449\u0438\u0442\u0430"} else 0
     modifier_details = []
     if race_bonus:
         modifier_details.append((f'\u0420\u0430\u0441\u0430 \u00ab{character["race"]}\u00bb', race_bonus))
     modifier_details.extend(talent_details)
+    modifier_details.extend(vehicle_details)
     modifier_details.extend(injury_details)
     if custom_modifier:
         modifier_details.append(("\u041f\u0440\u043e\u0447\u0438\u0435 \u043c\u043e\u0434\u0438\u0444\u0438\u043a\u0430\u0442\u043e\u0440\u044b", custom_modifier))
@@ -1237,6 +1257,11 @@ def inventory_slot_capacities(character: dict) -> tuple[int, int]:
     large = int(character["attributes"]["Телосложение"]["max"])
     small += int(talent_effect(character, "small_slots", 0) or 0)
     large += int(talent_effect(character, "large_slots", 0) or 0)
+    vehicles = set(character.get("active_vehicles", ()))
+    if "Ремонтный мотогрузовик «Мастерская»" in vehicles:
+        small += 1
+    if "Снабженческий мотогрузовик «Тягловик»" in vehicles:
+        large += 1
     return small, large
 
 
@@ -1608,6 +1633,7 @@ STORE_CATEGORIES = (
     "Оружие ближнего боя",
     "Броня",
     "Насадка",
+    "Транспорт",
     "Разное",
 )
 STORE_PAGE_SIZE = 5
@@ -1643,7 +1669,7 @@ def required_supply_level(item: dict) -> int | None:
     access = str(item.get("access") or "")
     if access.casefold() == "общедоступное":
         return 0
-    match = re.search(r"Снабжениеs+(I{1,3}|IV|V)", access, re.IGNORECASE)
+    match = re.search(r"(?:Снабжение|Обращение)\s+(III|IV|II|V|I)\b", access, re.IGNORECASE)
     return ROMAN_LEVELS.get(match.group(1).upper()) if match else None
 
 
@@ -1653,14 +1679,24 @@ def character_supply_level(character: dict) -> int:
     return int(character.get("skills", {}).get("Снабжение", -99))
 
 
+def character_store_level(character: dict, item: dict | None = None) -> int:
+    if item and store_category(item) == "Транспорт":
+        if character.get("class_name") != "Солдат":
+            return -99
+        return int(character.get("skills", {}).get("Обращение", -99))
+    return character_supply_level(character)
+
+
 def can_purchase(character: dict, item: dict, category: str | None = None) -> bool:
     required = required_supply_level(item)
+    if store_category(item) == "Транспорт" and character.get("class_name") != "Солдат":
+        return False
     return (
         store_category(item) != "Разное"
         and str(item.get("size") or "") != "Безделушка"
         and int(item.get("price") or 0) > 0
         and required is not None
-        and (required == 0 or character_supply_level(character) >= required)
+        and (required == 0 or character_store_level(character, item) >= required)
     )
 
 
@@ -1668,14 +1704,19 @@ def store_price(character: dict, item: dict) -> int:
     price = int(item.get("price") or 0)
     if price <= 0:
         return price
-    discount = 1 if "Бюрократия" in character.get("talents", {}) else 0
-    if character_supply_level(character) > 6:
+    is_vehicle = store_category(item) == "Транспорт"
+    discount = 1 if not is_vehicle and "Бюрократия" in character.get("talents", {}) else 0
+    if (
+        item.get("name") in MEDICAL_CONSUMABLES
+        and "Санитарная мотокарета «Белый хвост»" in character.get("active_vehicles", ())
+    ):
+        discount += 1
+    if not is_vehicle and character_supply_level(character) > 6:
         discount += 1
     return max(1, price - discount)
 
 
 def visible_store_items(character: dict, items: list[dict], category: str) -> list[dict]:
-    level = character_supply_level(character)
     visible = []
     for item in items:
         if str(item.get("size") or "") == "Безделушка":
@@ -1687,7 +1728,7 @@ def visible_store_items(character: dict, items: list[dict], category: str) -> li
             visible.append(item)
             continue
         required = required_supply_level(item)
-        if required is not None and (required == 0 or level >= required):
+        if required is not None and (required == 0 or character_store_level(character, item) >= required):
             visible.append(item)
     return visible
 
@@ -1825,7 +1866,8 @@ def build_store_embed(
     )
     embed.add_field(
         name="Лицевой счёт",
-        value=f'БС: **{character["supply_forms"]}** · Снабжение: **{supply_skill}**',
+        value=(f'БС: **{character["supply_forms"]}** · Снабжение: **{supply_skill}** · '
+               f'Обращение: **{character["skills"].get("Обращение", -3):+d}**'),
         inline=False,
     )
     embed.set_footer(text=f"Страница {page + 1}/{pages} · выберите предмет в списке")
@@ -2064,6 +2106,84 @@ class StoreView(discord.ui.View):
             ephemeral=False,
         )
 
+
+def vehicle_maintenance(item: dict) -> int:
+    text = " ".join(str(item.get(key) or "") for key in ("properties", "conditions", "description"))
+    match = re.search(r"Обслуживание:\s*(\d+)\s*БС", text, re.IGNORECASE)
+    return int(match.group(1)) if match else 0
+
+
+def build_motor_pool_embed(pool: dict) -> discord.Embed:
+    lines = []
+    total = 0
+    for item in pool["items"]:
+        upkeep = vehicle_maintenance(item)
+        subtotal = upkeep * int(item["quantity"])
+        total += subtotal
+        lines.append(
+            f'**{item["name"]}** ×{item["quantity"]}\n'
+            f'└─ Прочность: **{item["max_durability"]}** · обслуживание: '
+            f'**{upkeep} БС** за единицу (**{subtotal} БС** всего)\n'
+            f'└─ {short(str(item.get("description") or "Без описания"), 350)}'
+        )
+    embed = discord.Embed(
+        title="Автопарк отделения",
+        description=short("\n────────────\n".join(lines) or "Автопарк пока пуст.", 3900),
+        color=0x4E5B50,
+    )
+    embed.add_field(
+        name="Фонд обслуживания",
+        value=(f'Внесено: **{pool["balance"]} БС** · требуется за интервал: **{total} БС**\n'
+               f'Статус бонусов: **{"действуют" if pool.get("maintenance_active") else "неактивны до полной оплаты"}**'),
+        inline=False,
+    )
+    embed.set_footer(text="Средства фонда принадлежат автопарку и списываются мастером за интервал.")
+    return embed
+
+
+class MotorPoolDepositModal(discord.ui.Modal, title="Внести БС на обслуживание"):
+    amount = discord.ui.TextInput(
+        label="Количество БС", placeholder="Например: 3", min_length=1, max_length=4
+    )
+
+    async def on_submit(self, interaction: discord.Interaction):
+        try:
+            amount = int(str(self.amount).strip())
+            if amount < 1:
+                raise ValueError
+        except ValueError:
+            await interaction.response.send_message("Введите целое положительное количество БС.", ephemeral=True)
+            return
+        character = await bot.db.character(interaction.guild_id, interaction.user.id)
+        if not character:
+            await interaction.response.send_message("Сначала зарегистрируйте персонажа.", ephemeral=True)
+            return
+        success, message, personal, fund = await bot.db.deposit_motor_pool_funds(
+            interaction.guild_id, character["id"], amount
+        )
+        if not success:
+            await interaction.response.send_message(message, ephemeral=True)
+            return
+        await interaction.response.send_message(
+            f'{interaction.user.mention} внёс в автопарк **{amount} БС**. '
+            f'Фонд: **{fund} БС** · личный остаток: **{personal} БС**.',
+            ephemeral=False,
+        )
+
+
+class MotorPoolView(discord.ui.View):
+    def __init__(self):
+        super().__init__(timeout=900)
+
+    @discord.ui.button(label="Внести БС на обслуживание", style=discord.ButtonStyle.success)
+    async def deposit(self, interaction: discord.Interaction, _: discord.ui.Button):
+        await interaction.response.send_modal(MotorPoolDepositModal())
+
+    @discord.ui.button(label="Обновить", style=discord.ButtonStyle.secondary)
+    async def refresh(self, interaction: discord.Interaction, _: discord.ui.Button):
+        pool = await bot.db.motor_pool(interaction.guild_id)
+        await interaction.response.edit_message(embed=build_motor_pool_embed(pool), view=MotorPoolView())
+
 SUPPLY_ORDER_PAGE_SIZE = 5
 
 
@@ -2162,7 +2282,10 @@ class SupplyOrdersView(discord.ui.View):
             member = interaction.guild.get_member(int(order["user_id"])) if interaction.guild else None
             if member:
                 try:
-                    result = "одобрена — предмет добавлен на склад снабжения" if approve else f'отклонена — возвращено {order["paid_price"]} БС'
+                    result = (
+                        f'одобрена — покупка добавлена {order.get("destination", "на склад снабжения")}'
+                        if approve else f'отклонена — возвращено {order["paid_price"]} БС'
+                    )
                     await member.send(f'Ваша заявка на **{order["item_name"]}** {result}.')
                 except discord.HTTPException:
                     pass
@@ -3635,6 +3758,43 @@ async def store_command(interaction: discord.Interaction):
     await interaction.response.send_message(
         embed=build_store_embed(character, items, "Снаряжение", 0),
         view=StoreView(character, items),
+        ephemeral=False,
+    )
+
+
+@bot.tree.command(name="автопарк", description="Открыть общий автопарк отделения")
+async def motor_pool_command(interaction: discord.Interaction):
+    pool = await bot.db.motor_pool(interaction.guild_id)
+    await interaction.response.send_message(
+        embed=build_motor_pool_embed(pool), view=MotorPoolView(), ephemeral=False
+    )
+
+
+@bot.tree.command(
+    name="снять-бс-обслуживание",
+    description="Администратор: списать фонд на обслуживание всего автопарка",
+)
+@app_commands.check(require_master_access)
+async def charge_motor_pool_command(interaction: discord.Interaction):
+    result = await bot.db.charge_motor_pool_maintenance(interaction.guild_id)
+    lines = [
+        f'**{item["name"]}** ×{item["quantity"]}: {item["subtotal"]} БС'
+        for item in result["items"] if item["subtotal"]
+    ]
+    if result["shortfall"]:
+        conclusion = (
+            f'Внесённые средства списаны: **{result["paid"]} БС**. '
+            f'Не хватает: **{result["shortfall"]} БС**.'
+        )
+    else:
+        conclusion = (
+            f'Обслуживание полностью оплачено: **{result["paid"]} БС**. '
+            f'Остаток фонда: **{result["balance"]} БС**.'
+        )
+    await interaction.response.send_message(
+        "**Обслуживание автопарка**\n"
+        + ("\n".join(lines) if lines else "Нет техники, требующей обслуживания.")
+        + f'\n────────────\nВсего: **{result["total"]} БС**\n{conclusion}',
         ephemeral=False,
     )
 

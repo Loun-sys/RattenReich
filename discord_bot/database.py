@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -140,6 +141,21 @@ CREATE TABLE IF NOT EXISTS supply_warehouse (
     deposited_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 CREATE INDEX IF NOT EXISTS idx_supply_warehouse_guild ON supply_warehouse(guild_id);
+CREATE TABLE IF NOT EXISTS motor_pool (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    guild_id INTEGER NOT NULL,
+    item_id INTEGER NOT NULL REFERENCES item_catalog(id) ON DELETE RESTRICT,
+    quantity INTEGER NOT NULL DEFAULT 1,
+    purchased_by INTEGER,
+    added_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE(guild_id,item_id)
+);
+CREATE INDEX IF NOT EXISTS idx_motor_pool_guild ON motor_pool(guild_id);
+CREATE TABLE IF NOT EXISTS motor_pool_funds (
+    guild_id INTEGER PRIMARY KEY,
+    balance INTEGER NOT NULL DEFAULT 0,
+    maintenance_active INTEGER NOT NULL DEFAULT 0
+);
 CREATE TABLE IF NOT EXISTS app_migrations (
     key TEXT PRIMARY KEY,
     applied_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
@@ -261,6 +277,13 @@ class Database:
             for name, definition in catalog_migrations.items():
                 if name not in catalog_columns:
                     await db.execute(f"ALTER TABLE item_catalog ADD COLUMN {name} {definition}")
+            motor_fund_columns = {
+                row["name"] for row in await db.execute_fetchall("PRAGMA table_info(motor_pool_funds)")
+            }
+            if "maintenance_active" not in motor_fund_columns:
+                await db.execute(
+                    "ALTER TABLE motor_pool_funds ADD COLUMN maintenance_active INTEGER NOT NULL DEFAULT 0"
+                )
             npc_columns = {row["name"] for row in await db.execute_fetchall("PRAGMA table_info(npcs)")}
             npc_migrations = {
                 "physique": "INTEGER NOT NULL DEFAULT 1",
@@ -611,7 +634,8 @@ class Database:
                     WHERE guild_id=0 AND source_number IS NOT NULL
                     AND source_number NOT IN ({placeholders})
                     AND NOT EXISTS (SELECT 1 FROM inventory i WHERE i.item_id=item_catalog.id)
-                    AND NOT EXISTS (SELECT 1 FROM supply_warehouse sw WHERE sw.item_id=item_catalog.id)""",
+                    AND NOT EXISTS (SELECT 1 FROM supply_warehouse sw WHERE sw.item_id=item_catalog.id)
+                    AND NOT EXISTS (SELECT 1 FROM motor_pool mp WHERE mp.item_id=item_catalog.id)""",
                 active_numbers,
             )
             for item in items:
@@ -767,6 +791,14 @@ class Database:
             result["injuries"] = [dict(r) for r in injuries]
             luck = await db.execute_fetchall("SELECT percent FROM luck_modifiers WHERE user_id=?", (user_id,))
             result["luck_percent"] = int(luck[0]["percent"]) if luck else 0
+            fleet = await db.execute_fetchall(
+                """SELECT ic.name FROM motor_pool mp
+                   JOIN item_catalog ic ON ic.id=mp.item_id
+                   JOIN motor_pool_funds mf ON mf.guild_id=mp.guild_id
+                   WHERE mp.guild_id=? AND mf.maintenance_active=1""",
+                (guild_id,),
+            )
+            result["active_vehicles"] = [row["name"] for row in fleet]
             return result
 
     async def set_luck_modifier(self, user_id: int, percent: int) -> None:
@@ -1356,23 +1388,37 @@ class Database:
             if item["category"] == "Разное" or item["access"] == "Не продаётся":
                 await db.rollback()
                 return False, "Этот предмет нельзя приобрести в магазине.", None
+            is_vehicle = item["category"] == "Транспорт"
+            required_skill = "Обращение" if is_vehicle else "Снабжение"
+            required_class = "Солдат" if is_vehicle else "Снабженец"
             skills = await db.execute_fetchall(
-                "SELECT value FROM skills WHERE character_id=? AND name='\u0421\u043d\u0430\u0431\u0436\u0435\u043d\u0438\u0435'",
-                (character_id,),
+                "SELECT value FROM skills WHERE character_id=? AND name=?",
+                (character_id, required_skill),
             )
-            level = int(skills[0]["value"]) if skills and character["class_name"] == "\u0421\u043d\u0430\u0431\u0436\u0435\u043d\u0435\u0446" else -99
+            level = int(skills[0]["value"]) if skills and character["class_name"] == required_class else -99
             if required_supply_level > 0 and level < required_supply_level:
                 await db.rollback()
-                return False, f"\u0422\u0440\u0435\u0431\u0443\u0435\u0442\u0441\u044f \u0421\u043d\u0430\u0431\u0436\u0435\u043d\u0438\u0435 {required_supply_level}.", None
+                return False, f"Требуется {required_skill} {required_supply_level} и класс {required_class}.", None
             price = int(item["price"] or 0)
             if price < 1:
                 await db.rollback()
                 return False, "У предмета не указана цена.", None
-            bureaucracy = await db.execute_fetchall(
+            bureaucracy = [] if is_vehicle else await db.execute_fetchall(
                 "SELECT 1 FROM talents WHERE character_id=? AND lower(name)=lower('Бюрократия') LIMIT 1",
                 (character_id,),
             )
-            discount = (1 if bureaucracy else 0) + (1 if level > 6 else 0)
+            discount = (1 if bureaucracy else 0) + (1 if not is_vehicle and level > 6 else 0)
+            if item["name"] in MEDICAL_CONSUMABLES:
+                ambulance = await db.execute_fetchall(
+                    """SELECT 1 FROM motor_pool mp
+                       JOIN item_catalog ic ON ic.id=mp.item_id
+                       JOIN motor_pool_funds mf ON mf.guild_id=mp.guild_id
+                       WHERE mp.guild_id=(SELECT guild_id FROM characters WHERE id=?)
+                         AND mf.maintenance_active=1
+                         AND ic.name='Санитарная мотокарета «Белый хвост»' LIMIT 1""",
+                    (character_id,),
+                )
+                discount += 1 if ambulance else 0
             price = max(1, price - discount)
             balance = int(character["supply_forms"])
             if balance < price:
@@ -1428,7 +1474,14 @@ class Database:
                     await db.rollback()
                     return False, "Предмет больше не существует в каталоге. Отклоните заявку для возврата БС.", order
                 item = dict(item_rows[0])
-                if is_consumable_item(item):
+                if item["category"] == "Транспорт":
+                    await db.execute(
+                        """INSERT INTO motor_pool(guild_id,item_id,quantity,purchased_by)
+                           VALUES(?,?,1,?) ON CONFLICT(guild_id,item_id)
+                           DO UPDATE SET quantity=quantity+1""",
+                        (guild_id, order["item_id"], order["user_id"]),
+                    )
+                elif is_consumable_item(item):
                     stacks = await db.execute_fetchall(
                         """SELECT id FROM supply_warehouse
                            WHERE guild_id=? AND item_id=? AND durability=? AND ammo IS ?
@@ -1448,7 +1501,9 @@ class Database:
                         (guild_id, order["item_id"], item["max_durability"], item["ammo_max"], reviewer_id),
                     )
                 status = "approved"
-                message = f'Заявка одобрена: {order["item_name"]} добавлен на склад снабжения.'
+                destination = "в автопарк" if item["category"] == "Транспорт" else "на склад снабжения"
+                message = f'Заявка одобрена: {order["item_name"]} добавлен {destination}.'
+                order["destination"] = destination
             else:
                 await db.execute(
                     "UPDATE characters SET supply_forms=supply_forms+? WHERE id=?",
@@ -1476,6 +1531,93 @@ class Database:
                 (guild_id,),
             )
             return [dict(row) for row in rows]
+
+    async def motor_pool(self, guild_id: int) -> dict[str, Any]:
+        async with self.connect() as db:
+            rows = await db.execute_fetchall(
+                """SELECT mp.*,ic.name,ic.description,ic.properties,ic.conditions,
+                          ic.max_durability,ic.access
+                   FROM motor_pool mp JOIN item_catalog ic ON ic.id=mp.item_id
+                   WHERE mp.guild_id=? ORDER BY ic.name""",
+                (guild_id,),
+            )
+            funds = await db.execute_fetchall(
+                "SELECT balance,maintenance_active FROM motor_pool_funds WHERE guild_id=?", (guild_id,)
+            )
+            return {
+                "items": [dict(row) for row in rows],
+                "balance": int(funds[0]["balance"]) if funds else 0,
+                "maintenance_active": bool(funds and funds[0]["maintenance_active"]),
+            }
+
+    async def deposit_motor_pool_funds(
+        self, guild_id: int, character_id: int, amount: int,
+    ) -> tuple[bool, str, int, int]:
+        amount = max(1, int(amount))
+        async with self.connect() as db:
+            await db.execute("BEGIN IMMEDIATE")
+            rows = await db.execute_fetchall(
+                "SELECT supply_forms FROM characters WHERE id=? AND guild_id=?",
+                (character_id, guild_id),
+            )
+            if not rows:
+                await db.rollback()
+                return False, "Персонаж не найден.", 0, 0
+            character_balance = int(rows[0]["supply_forms"])
+            if character_balance < amount:
+                await db.rollback()
+                return False, f"Недостаточно БС: доступно {character_balance}.", character_balance, 0
+            await db.execute(
+                "UPDATE characters SET supply_forms=supply_forms-? WHERE id=?",
+                (amount, character_id),
+            )
+            await db.execute(
+                """INSERT INTO motor_pool_funds(guild_id,balance) VALUES(?,?)
+                   ON CONFLICT(guild_id) DO UPDATE SET balance=balance+excluded.balance""",
+                (guild_id, amount),
+            )
+            funds = await db.execute_fetchall(
+                "SELECT balance FROM motor_pool_funds WHERE guild_id=?", (guild_id,)
+            )
+            await db.commit()
+            return True, f"В автопарк внесено {amount} БС.", character_balance - amount, int(funds[0]["balance"])
+
+    async def charge_motor_pool_maintenance(self, guild_id: int) -> dict[str, Any]:
+        async with self.connect() as db:
+            await db.execute("BEGIN IMMEDIATE")
+            rows = await db.execute_fetchall(
+                """SELECT ic.name,mp.quantity,ic.conditions,ic.properties,ic.description
+                   FROM motor_pool mp JOIN item_catalog ic ON ic.id=mp.item_id
+                   WHERE mp.guild_id=? ORDER BY ic.name""",
+                (guild_id,),
+            )
+            breakdown = []
+            total = 0
+            for row in rows:
+                text = " ".join(str(row[key] or "") for key in ("conditions", "properties", "description"))
+                match = re.search(r"Обслуживание:\s*(\d+)\s*БС", text, re.IGNORECASE)
+                upkeep = int(match.group(1)) if match else 0
+                subtotal = upkeep * int(row["quantity"])
+                total += subtotal
+                breakdown.append({"name": row["name"], "quantity": int(row["quantity"]), "upkeep": upkeep, "subtotal": subtotal})
+            funds = await db.execute_fetchall(
+                "SELECT balance FROM motor_pool_funds WHERE guild_id=?", (guild_id,)
+            )
+            balance = int(funds[0]["balance"]) if funds else 0
+            paid = min(balance, total)
+            remaining = balance - paid
+            active = 1 if total > 0 and paid == total else 0
+            await db.execute(
+                """INSERT INTO motor_pool_funds(guild_id,balance,maintenance_active) VALUES(?,?,?)
+                   ON CONFLICT(guild_id) DO UPDATE SET
+                       balance=excluded.balance,maintenance_active=excluded.maintenance_active""",
+                (guild_id, remaining, active),
+            )
+            await db.commit()
+            return {
+                "items": breakdown, "total": total, "paid": paid,
+                "shortfall": total - paid, "balance": remaining,
+            }
 
     async def take_from_supply_warehouse(
         self, guild_id: int, character_id: int, warehouse_id: int,

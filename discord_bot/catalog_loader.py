@@ -192,6 +192,9 @@ def _synchronize_access_text(item: dict[str, Any]) -> None:
             )
 
 def _balance_item(item: dict[str, Any]) -> dict[str, Any]:
+    if item.pop("manual_balance", False):
+        _synchronize_access_text(item)
+        return item
     category = str(item.get("category") or "")
     uses = MULTI_USE_CONSUMABLES.get(str(item.get("name") or ""))
     if uses:
@@ -404,6 +407,10 @@ def load_catalog(path: Path) -> list[dict[str, Any]]:
     if approved_path.exists():
         approved = json.loads(approved_path.read_text(encoding="utf-8"))
         result.extend(approved.get("items", []))
+    expansion_path = path.parent / "ARMORY_TRANSPORT_EXPANSION.json"
+    if expansion_path.exists():
+        expansion = json.loads(expansion_path.read_text(encoding="utf-8"))
+        result.extend(expansion.get("items", []))
     for index, attachment in enumerate(ATTACHMENTS, 600):
         result.append({
             "source_number": index, "name": attachment["name"], "size": "Безделушка",
