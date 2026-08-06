@@ -5199,6 +5199,34 @@ async def defense_command(
         await view.finish_damage(interaction, 0, {})
 
 
+def transport_effect_title(effect: str) -> str:
+    text = effect.casefold()
+    if "защит" in text or "брон" in text:
+        return "Защитная поддержка"
+    if "стрельб" in text or "драк" in text or "бой" in text:
+        return "Боевая поддержка"
+    if "лечен" in text or "медицин" in text or "восстанавли" in text:
+        return "Медицинская поддержка"
+    if any(word in text for word in ("снабжен", "достав", "заявк", "бс", "ремонт")):
+        return "Снабжение и тыл"
+    if "слот" in text or "провер" in text:
+        return "Пассивный бонус"
+    return "Особенность"
+
+
+def transport_effects_text(conditions: str) -> str:
+    effects = [part.strip() for part in re.split(r"(?<=[.!?])\s+", conditions) if part.strip()]
+    return "\n".join(
+        f'**{index:02d} · {transport_effect_title(effect)}**\n└─ {effect}\n────────────'
+        for index, effect in enumerate(effects, 1)
+    ).rstrip("\n────────────")
+
+
+def transport_passport_text(properties: str) -> str:
+    parts = [part.strip() for part in properties.split(";") if part.strip()]
+    return "\n".join(f'└─ **{part.split(":", 1)[0]}:**{part.split(":", 1)[1]}' if ":" in part else f"└─ {part}" for part in parts)
+
+
 def catalog_item_embed(item: dict) -> discord.Embed:
     description = str(item.get("description") or item.get("conditions") or "Описание отсутствует.")
     embed = discord.Embed(
@@ -5221,7 +5249,10 @@ def catalog_item_embed(item: dict) -> discord.Embed:
     category = str(item.get("category") or "")
     quality = int(item.get("max_durability") or item.get("gear") or 0)
     if quality:
-        label = "Защита / качество" if category in {"Броня", "Щит"} else "Качество / :gears:"
+        if category == "Транспорт":
+            label = "Прочность транспорта"
+        else:
+            label = "Защита / качество" if category in {"Броня", "Щит"} else "Качество / :gears:"
         stats.append(f"**{label}:** {quality}")
     if int(item.get("damage") or 0) > 0:
         stats.append(f'**Урон:** {item["damage"]}')
@@ -5240,10 +5271,24 @@ def catalog_item_embed(item: dict) -> discord.Embed:
 
     properties = str(item.get("properties") or "").strip()
     if properties:
-        embed.add_field(name="Свойства", value=short(properties, 1024), inline=False)
+        if category == "Транспорт":
+            embed.add_field(
+                name="Паспорт машины",
+                value=short(transport_passport_text(properties), 1024),
+                inline=False,
+            )
+        else:
+            embed.add_field(name="Свойства", value=short(properties, 1024), inline=False)
     conditions = str(item.get("conditions") or "").strip()
-    if conditions and conditions.casefold() != description.casefold():
-        embed.add_field(name="Условия и эффекты", value=short(conditions, 1024), inline=False)
+    if conditions and (category == "Транспорт" or conditions.casefold() != description.casefold()):
+        if category == "Транспорт":
+            embed.add_field(
+                name="Эффекты транспорта",
+                value=short(transport_effects_text(conditions), 1024),
+                inline=False,
+            )
+        else:
+            embed.add_field(name="Условия и эффекты", value=short(conditions, 1024), inline=False)
 
     modifiers: list[str] = []
     for field_name, label in (("attribute_modifiers", "Характеристики"), ("skill_modifiers", "Навыки")):
