@@ -1689,11 +1689,12 @@ def character_store_level(character: dict, item: dict | None = None) -> int:
 
 def can_purchase(character: dict, item: dict, category: str | None = None) -> bool:
     required = required_supply_level(item)
+    item_category = store_category(item)
     if store_category(item) == "Транспорт" and character.get("class_name") != "Солдат":
         return False
     return (
-        store_category(item) != "Разное"
-        and str(item.get("size") or "") != "Безделушка"
+        item_category != "Разное"
+        and (str(item.get("size") or "") != "Безделушка" or item_category == "Насадка")
         and int(item.get("price") or 0) > 0
         and required is not None
         and (required == 0 or character_store_level(character, item) >= required)
@@ -1719,9 +1720,9 @@ def store_price(character: dict, item: dict) -> int:
 def visible_store_items(character: dict, items: list[dict], category: str) -> list[dict]:
     visible = []
     for item in items:
-        if str(item.get("size") or "") == "Безделушка":
-            continue
         item_category = store_category(item)
+        if str(item.get("size") or "") == "Безделушка" and item_category not in {"Насадка", "Разное"}:
+            continue
         if category != "Все" and item_category != category:
             continue
         if item_category == "Разное":
