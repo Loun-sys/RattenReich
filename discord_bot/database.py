@@ -1425,17 +1425,31 @@ class Database:
                 await db.rollback()
                 return False, f"Недостаточно БС: требуется {price}, доступно {balance}.", balance
             balance -= price
-            await db.execute(
-                """INSERT INTO purchase_orders(
-                       guild_id,character_id,item_id,item_name,paid_price
-                   ) VALUES((SELECT guild_id FROM characters WHERE id=?),?,?,?,?)""",
-                (character_id, character_id, item_id, item["name"], price),
-            )
+            requires_approval = "одобрение" in str(item["access"] or "").casefold()
+            if is_vehicle and not requires_approval:
+                guild_rows = await db.execute_fetchall(
+                    "SELECT guild_id,user_id FROM characters WHERE id=?", (character_id,)
+                )
+                await db.execute(
+                    """INSERT INTO motor_pool(guild_id,item_id,quantity,purchased_by)
+                       VALUES(?,?,1,?) ON CONFLICT(guild_id,item_id)
+                       DO UPDATE SET quantity=quantity+1""",
+                    (guild_rows[0]["guild_id"], item_id, guild_rows[0]["user_id"]),
+                )
+            else:
+                await db.execute(
+                    """INSERT INTO purchase_orders(
+                           guild_id,character_id,item_id,item_name,paid_price
+                       ) VALUES((SELECT guild_id FROM characters WHERE id=?),?,?,?,?)""",
+                    (character_id, character_id, item_id, item["name"], price),
+                )
             await db.execute(
                 "UPDATE characters SET supply_forms=? WHERE id=?",
                 (balance, character_id),
             )
             await db.commit()
+            if is_vehicle and not requires_approval:
+                return True, f'{item["name"]} приобретён и добавлен в автопарк за {price} БС.', balance
             return True, f'Заявка на {item["name"]} создана. Зарезервировано {price} БС.', balance
 
     async def pending_purchase_orders(self, guild_id: int) -> list[dict[str, Any]]:

@@ -2101,8 +2101,13 @@ class StoreView(discord.ui.View):
             view=view,
         )
         await interaction.followup.send(
-            f'{interaction.user.mention} заказывает **{item["name"]}** за **{paid} БС**. '
-            f'Скидка: **{discount} БС**. Заявка ожидает решения снабжения.',
+            (
+                f'{interaction.user.mention} приобретает **{item["name"]}** за **{paid} БС**. '
+                f'Транспорт сразу добавлен в автопарк.'
+                if store_category(item) == "Транспорт" and "одобрение" not in str(item.get("access") or "").casefold()
+                else f'{interaction.user.mention} заказывает **{item["name"]}** за **{paid} БС**. '
+                     f'Скидка: **{discount} БС**. Заявка ожидает решения снабжения.'
+            ),
             ephemeral=False,
         )
 
@@ -3852,8 +3857,13 @@ async def buy_item_command(interaction: discord.Interaction, предмет: str
     paid = store_price(character, item)
     discount = max(0, base_price - paid)
     await interaction.response.send_message(
-        f'{interaction.user.mention} заказывает **{item["name"]}** за **{paid} БС**. '
-        f'Скидка: **{discount} БС**. Заявка ожидает решения снабжения.',
+        (
+            f'{interaction.user.mention} приобретает **{item["name"]}** за **{paid} БС**. '
+            f'Транспорт сразу добавлен в автопарк.'
+            if store_category(item) == "Транспорт" and "одобрение" not in str(item.get("access") or "").casefold()
+            else f'{interaction.user.mention} заказывает **{item["name"]}** за **{paid} БС**. '
+                 f'Скидка: **{discount} БС**. Заявка ожидает решения снабжения.'
+        ),
         ephemeral=False,
     )
 
