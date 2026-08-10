@@ -4263,19 +4263,123 @@ async def skill_roll_command(
     )
 
 
+class FreeDiceRollView(discord.ui.View):
+    def __init__(
+        self,
+        owner_id: int,
+        owner_name: str,
+        yellow_rolls: list[int],
+        green_rolls: list[int],
+        black_rolls: list[int],
+        negative_rolls: list[int],
+        luck_percent: int,
+    ):
+        super().__init__(timeout=300)
+        self.owner_id = owner_id
+        self.owner_name = owner_name
+        self.yellow_rolls = yellow_rolls
+        self.green_rolls = green_rolls
+        self.black_rolls = black_rolls
+        self.negative_rolls = negative_rolls
+        self.luck_percent = luck_percent
+        self.push_count = 0
+
+    def embed(self) -> discord.Embed:
+        embed = discord.Embed(title="Свободный бросок", color=0x6E654F)
+
+        def add_dice_fields(label: str, values: list[int], color: str) -> None:
+            for offset in range(0, len(values), 25):
+                chunk = values[offset:offset + 25]
+                part = offset // 25 + 1
+                parts = (len(values) + 24) // 25
+                suffix = f" · часть {part}/{parts}" if parts > 1 else ""
+                embed.add_field(
+                    name=f"{label} · {len(values)}{suffix}",
+                    value=colored_dice(chunk, color),
+                    inline=False,
+                )
+
+        add_dice_fields("Жёлтые", self.yellow_rolls, "attribute")
+        add_dice_fields("Зелёные", self.green_rolls, "skill")
+        add_dice_fields("Чёрные", self.black_rolls, "gear")
+        add_dice_fields("Негативные", self.negative_rolls, "negative")
+        positive_successes = sum(
+            value == 6
+            for value in self.yellow_rolls + self.green_rolls + self.black_rolls
+        )
+        negative_successes = sum(value == 6 for value in self.negative_rolls)
+        embed.add_field(
+            name="Итог",
+            value=(
+                f"Положительных успехов: **{positive_successes}** · "
+                f"негативных успехов: **{negative_successes}** · "
+                f"результат: **{positive_successes - negative_successes}**"
+            ),
+            inline=False,
+        )
+        if self.push_count:
+            embed.add_field(name="Пуш", value=f"Выполнено: **{self.push_count}**", inline=False)
+        embed.set_footer(text=f"Бросил: {self.owner_name}")
+        return embed
+
+    @staticmethod
+    def reroll_positive(values: list[int], luck_percent: int) -> list[int]:
+        return [
+            value if value in (1, 6) else d6_with_luck(1, luck_percent)[0]
+            for value in values
+        ]
+
+    @discord.ui.button(label="Пуш", style=discord.ButtonStyle.primary)
+    async def push_button(self, interaction: discord.Interaction, _: discord.ui.Button):
+        if interaction.user.id != self.owner_id:
+            await interaction.response.send_message(
+                "Пушить может только владелец броска.", ephemeral=True,
+            )
+            return
+        self.yellow_rolls = self.reroll_positive(self.yellow_rolls, self.luck_percent)
+        self.green_rolls = self.reroll_positive(self.green_rolls, self.luck_percent)
+        self.black_rolls = self.reroll_positive(self.black_rolls, self.luck_percent)
+        self.negative_rolls = [
+            value if value == 6 else d6_with_luck(1, -self.luck_percent)[0]
+            for value in self.negative_rolls
+        ]
+        self.push_count += 1
+        await interaction.response.edit_message(embed=self.embed(), view=self)
+
+    @discord.ui.button(label="Завершить бросок", style=discord.ButtonStyle.success)
+    async def finish_button(self, interaction: discord.Interaction, _: discord.ui.Button):
+        if interaction.user.id != self.owner_id:
+            await interaction.response.send_message(
+                "Завершить бросок может только его владелец.", ephemeral=True,
+            )
+            return
+        self.push_button.disabled = True
+        self.finish_button.disabled = True
+        embed = self.embed()
+        embed.add_field(
+            name="Бросок завершён",
+            value="Игрок подтвердил отказ от дальнейшего пуша.",
+            inline=False,
+        )
+        self.stop()
+        await interaction.response.edit_message(embed=embed, view=self)
+
+
 @bot.tree.command(name="бросок", description="Бросить произвольное количество цветных кубов")
 @app_commands.describe(
     желтые="Количество жёлтых кубов",
     зеленые="Количество зелёных кубов",
+    черные="Количество чёрных кубов снаряжения",
     негативные="Количество негативных кубов",
 )
 async def free_dice_roll_command(
     interaction: discord.Interaction,
     желтые: app_commands.Range[int, 0, 50] = 0,
     зеленые: app_commands.Range[int, 0, 50] = 0,
+    черные: app_commands.Range[int, 0, 50] = 0,
     негативные: app_commands.Range[int, 0, 50] = 0,
 ):
-    if желтые + зеленые + негативные <= 0:
+    if желтые + зеленые + черные + негативные <= 0:
         await interaction.response.send_message(
             "Укажите хотя бы один куб для броска.", ephemeral=True,
         )
@@ -4283,37 +4387,18 @@ async def free_dice_roll_command(
     luck_percent = await bot.db.get_luck_modifier(interaction.user.id)
     yellow_rolls = d6_with_luck(желтые, luck_percent)
     green_rolls = d6_with_luck(зеленые, luck_percent)
+    black_rolls = d6_with_luck(черные, luck_percent)
     negative_rolls = d6_with_luck(негативные, -luck_percent)
-    positive_successes = sum(value == 6 for value in yellow_rolls + green_rolls)
-    negative_successes = sum(value == 6 for value in negative_rolls)
-    embed = discord.Embed(title="Свободный бросок", color=0x6E654F)
-
-    def add_dice_fields(label: str, values: list[int], color: str) -> None:
-        for offset in range(0, len(values), 25):
-            chunk = values[offset:offset + 25]
-            part = offset // 25 + 1
-            parts = (len(values) + 24) // 25
-            suffix = f" · часть {part}/{parts}" if parts > 1 else ""
-            embed.add_field(
-                name=f"{label} · {len(values)}{suffix}",
-                value=colored_dice(chunk, color),
-                inline=False,
-            )
-
-    add_dice_fields("Жёлтые", yellow_rolls, "attribute")
-    add_dice_fields("Зелёные", green_rolls, "skill")
-    add_dice_fields("Негативные", negative_rolls, "negative")
-    embed.add_field(
-        name="Итог",
-        value=(
-            f"Положительных успехов: **{positive_successes}** · "
-            f"негативных успехов: **{negative_successes}** · "
-            f"результат: **{positive_successes - negative_successes}**"
-        ),
-        inline=False,
+    view = FreeDiceRollView(
+        interaction.user.id,
+        interaction.user.display_name,
+        yellow_rolls,
+        green_rolls,
+        black_rolls,
+        negative_rolls,
+        luck_percent,
     )
-    embed.set_footer(text=f"Бросил: {interaction.user.display_name}")
-    await interaction.response.send_message(embed=embed)
+    await interaction.response.send_message(embed=view.embed(), view=view)
 
 @skill_roll_command.autocomplete("навык")
 async def skill_roll_skill_autocomplete(interaction: discord.Interaction, current: str):
