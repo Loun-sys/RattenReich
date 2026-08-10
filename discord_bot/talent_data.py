@@ -126,7 +126,18 @@ CLASS_PROGRESSION_TALENTS = [
 ]
 
 
-def _record(name, description, rank, price, effects, kind="general", class_name=None, starter=False, skill_requirements=None):
+def _record(
+    name,
+    description,
+    rank,
+    price,
+    effects,
+    kind="general",
+    class_name=None,
+    starter=False,
+    skill_requirements=None,
+    talent_requirements=None,
+):
     return {
         "name": name,
         "description": description,
@@ -137,6 +148,7 @@ def _record(name, description, rank, price, effects, kind="general", class_name=
         "class_name": class_name,
         "starter": starter,
         "skill_requirements": dict(skill_requirements or {}),
+        "talent_requirements": tuple(talent_requirements or ()),
     }
 
 
@@ -158,6 +170,13 @@ TALENTS = [
     _record(name, description, rank, 16, effects, "skill", None, False, {skill: level, **extra})
     for skill, level, rank, name, description, extra, effects in SKILL_TALENTS
 ]
+
+TALENT_CHAIN_REQUIREMENTS = {
+    "Голос над строем": ("Знамя над окопом",),
+    "Несломленная воля": ("Голос над строем",),
+}
+for talent in TALENTS:
+    talent["talent_requirements"] = TALENT_CHAIN_REQUIREMENTS.get(talent["name"], ())
 
 CLASS_RESTRICTED = {
     "Чистильщик": "Солдат",

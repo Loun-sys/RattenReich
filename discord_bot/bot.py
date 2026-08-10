@@ -322,8 +322,15 @@ def talent_effect(character: dict, key: str, default=None):
     if all(isinstance(value, bool) for value in values):
         return any(values)
     if all(isinstance(value, (int, float)) and not isinstance(value, bool) for value in values):
+        if key.endswith("_cap"):
+            return max(values)
         return sum(values)
     return values[-1]
+
+
+def inspiration_will_cap(character: dict) -> int:
+    """Maximum Will that this character may restore with Inspiration."""
+    return int(talent_effect(character, "inspiration_will_cap", 4))
 
 
 INJURY_SKILL_STEMS = {
@@ -2471,7 +2478,15 @@ def talent_requirements_met(character: dict, talent: dict) -> bool:
     if int(talent.get("rank_required", 0)) > int(character["rank_index"]):
         return False
     skills = character.get("skills", {})
-    return all(int(skills.get(skill, -3)) >= int(level) for skill, level in talent.get("skill_requirements", {}).items())
+    if not all(
+        int(skills.get(skill, -3)) >= int(level)
+        for skill, level in talent.get("skill_requirements", {}).items()
+    ):
+        return False
+    owned = {name.casefold() for name in character.get("talents", {})}
+    return all(
+        name.casefold() in owned for name in talent.get("talent_requirements", ())
+    )
 
 
 def talent_requirement_text(talent: dict) -> str:
@@ -2479,6 +2494,7 @@ def talent_requirement_text(talent: dict) -> str:
     if talent.get("class_name"):
         parts.append(f'класс {talent["class_name"]}')
     parts.extend(f"{skill} {level}" for skill, level in talent.get("skill_requirements", {}).items())
+    parts.extend(f'талант «{name}»' for name in talent.get("talent_requirements", ()))
     return " · ".join(parts)
 
 
@@ -2636,6 +2652,7 @@ class TalentView(discord.ui.View):
             talent["class_name"],
             starters,
             talent.get("skill_requirements", {}),
+            talent.get("talent_requirements", ()),
         )
         if not success:
             await interaction.response.send_message(message, ephemeral=True)

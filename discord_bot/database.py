@@ -1911,6 +1911,7 @@ class Database:
         class_name: str | None = None,
         starter_names: tuple[str, ...] = (),
         skill_requirements: dict[str, int] | None = None,
+        talent_requirements: tuple[str, ...] = (),
     ) -> tuple[bool, str, int | None]:
         async with self.connect() as db:
             await db.execute("BEGIN IMMEDIATE")
@@ -1937,6 +1938,14 @@ class Database:
                 if current_level < int(required_level):
                     await db.rollback()
                     return False, f"Требуется навык {skill} {required_level}; сейчас {current_level}.", None
+            for required_talent in talent_requirements:
+                rows = await db.execute_fetchall(
+                    "SELECT 1 FROM talents WHERE character_id=? AND lower(name)=lower(?) LIMIT 1",
+                    (character_id, required_talent),
+                )
+                if not rows:
+                    await db.rollback()
+                    return False, f'Сначала требуется получить талант «{required_talent}».', None
             exists = await db.execute_fetchall(
                 "SELECT 1 FROM talents WHERE character_id=? AND lower(name)=lower(?) LIMIT 1",
                 (character_id, name),
