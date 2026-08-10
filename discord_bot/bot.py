@@ -3918,22 +3918,39 @@ async def supply_transfer(
     получатель: discord.Member,
     количество: app_commands.Range[int, 1, 999],
 ):
-    sender = await bot.db.character(interaction.guild_id, interaction.user.id)
-    recipient = await bot.db.character(interaction.guild_id, получатель.id)
-    if not sender:
-        await interaction.response.send_message("У вас нет зарегистрированного персонажа.", ephemeral=True)
-        return
-    if not recipient:
-        await interaction.response.send_message("У получателя нет зарегистрированного персонажа.", ephemeral=True)
-        return
+    await interaction.response.defer(thinking=True)
     try:
+        sender = await bot.db.character(interaction.guild_id, interaction.user.id)
+        recipient = await bot.db.character(interaction.guild_id, получатель.id)
+        if not sender:
+            await interaction.edit_original_response(
+                content="У вас нет зарегистрированного персонажа."
+            )
+            return
+        if not recipient:
+            await interaction.edit_original_response(
+                content="У получателя нет зарегистрированного персонажа."
+            )
+            return
         sender_balance, recipient_balance = await bot.db.transfer_supply(sender["id"], recipient["id"], количество)
     except ValueError as error:
-        await interaction.response.send_message(str(error), ephemeral=True)
+        await interaction.edit_original_response(content=str(error))
         return
-    await interaction.response.send_message(
-        f'{interaction.user.mention} передаёт {получатель.mention} **{количество} БС**. '
-        f'Остаток отправителя: **{sender_balance}**, баланс получателя: **{recipient_balance}**.'
+    except Exception:
+        logging.exception(
+            "Failed to transfer supply forms from %s to %s",
+            interaction.user.id,
+            получатель.id,
+        )
+        await interaction.edit_original_response(
+            content="Не удалось передать бланки. Ошибка записана в журнал бота."
+        )
+        return
+    await interaction.edit_original_response(
+        content=(
+            f'{interaction.user.mention} передаёт {получатель.mention} **{количество} БС**. '
+            f'Остаток отправителя: **{sender_balance}**, баланс получателя: **{recipient_balance}**.'
+        )
     )
 
 
@@ -4091,26 +4108,41 @@ async def item_transfer_command(
     предмет: str,
     количество: app_commands.Range[int, 1, 20] = 1,
 ):
+    await interaction.response.defer(thinking=True)
     if получатель.id == interaction.user.id:
-        await interaction.response.send_message("Нельзя передать предмет самому себе.", ephemeral=True)
+        await interaction.edit_original_response(content="Нельзя передать предмет самому себе.")
         return
-    sender = await bot.db.character(interaction.guild_id, interaction.user.id)
-    recipient = await bot.db.character(interaction.guild_id, получатель.id)
-    if not sender or not recipient:
-        await interaction.response.send_message(
-            "У отправителя или получателя нет зарегистрированного персонажа.",
-            ephemeral=True,
+    try:
+        sender = await bot.db.character(interaction.guild_id, interaction.user.id)
+        recipient = await bot.db.character(interaction.guild_id, получатель.id)
+        if not sender or not recipient:
+            await interaction.edit_original_response(
+                content="У отправителя или получателя нет зарегистрированного персонажа."
+            )
+            return
+        success, message = await bot.db.transfer_item(
+            sender["id"], recipient["id"], предмет, количество
+        )
+    except Exception:
+        logging.exception(
+            "Failed to transfer item from %s to %s: %s x%s",
+            interaction.user.id,
+            получатель.id,
+            предмет,
+            количество,
+        )
+        await interaction.edit_original_response(
+            content="Не удалось передать предмет. Ошибка записана в журнал бота."
         )
         return
-    success, message = await bot.db.transfer_item(
-        sender["id"], recipient["id"], предмет, количество
-    )
     if not success:
-        await interaction.response.send_message(message, ephemeral=True)
+        await interaction.edit_original_response(content=message)
         return
-    await interaction.response.send_message(
-        f'{interaction.user.mention} передаёт {получатель.mention}: '
-        f'**{предмет} ×{количество}**.'
+    await interaction.edit_original_response(
+        content=(
+            f'{interaction.user.mention} передаёт {получатель.mention}: '
+            f'**{предмет} ×{количество}**.'
+        )
     )
 
 
