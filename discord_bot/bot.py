@@ -3407,6 +3407,35 @@ async def dossier_command(interaction: discord.Interaction, участник: di
     await send_dossier(interaction, character)
 
 
+@bot.tree.command(name="медаль", description="Посмотреть изображение, описание и эффект награды")
+@app_commands.describe(медаль="Какую награду открыть")
+async def medal_reference_command(interaction: discord.Interaction, медаль: str):
+    item = MEDAL_BY_CODE.get(медаль)
+    if not item:
+        await interaction.response.send_message(
+            "Выберите награду из подсказок команды.",
+            ephemeral=True,
+        )
+        return
+    embed = discord.Embed(
+        title=f'🎖️ {item["name"]}',
+        description=item["description"],
+        color=0x9B6A2F,
+    )
+    embed.add_field(name="Постоянный эффект", value=item["effect"], inline=False)
+    embed.set_footer(text="Ratten Reich · справочник наград")
+    image_path = bot.renderer.assets_dir / "medals" / item["image"]
+    if image_path.exists():
+        filename = f"medal{image_path.suffix.lower()}"
+        embed.set_image(url=f"attachment://{filename}")
+        await interaction.response.send_message(
+            embed=embed,
+            file=discord.File(image_path, filename=filename),
+        )
+        return
+    await interaction.response.send_message(embed=embed)
+
+
 @bot.tree.command(name="медаль-выдать", description="Выдать персонажу медаль и занести основание в досье")
 @app_commands.describe(участник="Кого наградить", медаль="Награда", основание="За что выдана медаль")
 @app_commands.check(require_master_access)
@@ -3448,6 +3477,11 @@ async def medal_autocomplete(interaction: discord.Interaction, current: str):
         for item in MEDALS
         if not query or query in item["name"].casefold()
     ][:25]
+
+
+@medal_reference_command.autocomplete("медаль")
+async def medal_reference_autocomplete(interaction: discord.Interaction, current: str):
+    return await medal_autocomplete(interaction, current)
 
 
 @medal_award_command.autocomplete("медаль")

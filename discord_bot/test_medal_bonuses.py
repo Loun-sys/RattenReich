@@ -4,7 +4,7 @@ import asyncio
 import tempfile
 from pathlib import Path
 
-from bot import make_pool
+from bot import bot, make_pool
 from constants import ATTRIBUTES
 from database import Database, SCHEMA
 from medal_data import MEDALS, medal_bonus_summary
@@ -12,6 +12,9 @@ from medal_data import MEDALS, medal_bonus_summary
 
 def test_catalog_and_roll_bonuses() -> None:
     assert len(MEDALS) == 38
+    assert bot.tree.get_command("медаль") is not None
+    assets = Path(__file__).resolve().parent / "assets" / "medals"
+    assert all((assets / item["image"]).is_file() for item in MEDALS)
     class_medals = [item for item in MEDALS if item["effects"].get("class_skill_bonus")]
     assert class_medals
     assert all(item["effect"] == "постоянно дает +1 куб к проверкам классового навыка." for item in class_medals)
@@ -82,7 +85,49 @@ async def test_database_limits() -> None:
         assert character["infection"] == 6
 
 
+async def test_medal_name_swap_migration() -> None:
+    class MigrationDatabase(Database):
+        async def reload_base_catalog(self) -> int:
+            return 0
+
+        async def migrate_ammo_packages(self) -> int:
+            return 0
+
+        async def repair_ammo_package_contents(self) -> int:
+            return 0
+
+        async def merge_stackable_inventory(self) -> int:
+            return 0
+
+        async def split_nonstackable_inventory(self) -> int:
+            return 0
+
+    with tempfile.TemporaryDirectory(dir=Path(__file__).resolve().parent) as folder:
+        db = MigrationDatabase(Path(folder) / "migration.sqlite3")
+        async with db.connect() as connection:
+            await connection.executescript(SCHEMA)
+            await connection.execute(
+                "INSERT INTO medal_catalog(code,name,image,description,effect) VALUES(?,?,?,?,?)",
+                ("memory_1931", "Памятная медаль 1931 года", "old-1.png", "", ""),
+            )
+            await connection.execute(
+                "INSERT INTO medal_catalog(code,name,image,description,effect) VALUES(?,?,?,?,?)",
+                ("memory_1930", "Памятная медаль 1930 года", "old-2.png", "", ""),
+            )
+            await connection.commit()
+        await db.initialize()
+        async with db.connect() as connection:
+            rows = await connection.execute_fetchall(
+                "SELECT code,name FROM medal_catalog WHERE code IN ('memory_1930','memory_1931') ORDER BY code"
+            )
+        assert {row["code"]: row["name"] for row in rows} == {
+            "memory_1930": "Памятная медаль 1931 года",
+            "memory_1931": "Памятная медаль 1930 года",
+        }
+
+
 if __name__ == "__main__":
     test_catalog_and_roll_bonuses()
     asyncio.run(test_database_limits())
+    asyncio.run(test_medal_name_swap_migration())
     print("medal bonus tests: OK")

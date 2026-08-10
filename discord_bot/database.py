@@ -368,6 +368,13 @@ class Database:
                 f"DELETE FROM medal_catalog WHERE code NOT IN ({medal_placeholders})",
                 medal_codes,
             )
+            # Names are UNIQUE. Neutralize existing rows before catalog sync so two
+            # retained medals can safely exchange names in the same migration.
+            for medal in MEDALS:
+                await db.execute(
+                    "UPDATE medal_catalog SET name=? WHERE code=? AND name<>?",
+                    (f'__rr_medal_sync_{medal["code"]}', medal["code"], medal["name"]),
+                )
             for medal in MEDALS:
                 await db.execute(
                     """INSERT INTO medal_catalog(code,name,image,description,effect)
