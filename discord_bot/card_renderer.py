@@ -147,7 +147,7 @@ class CardRenderer:
         draw.text(point(68, 470), "ВОЛЯ", fill=muted, font=_font(s(10), True))
         draw.text(point(68, 486), f'{character["will_current"]} / {character["will_max"]}', fill=status_accent, font=_font(s(20), True))
         draw.text(point(267, 470), "ЗАРАЖЕНИЕ", fill=muted, font=_font(s(10), True))
-        draw.text(point(267, 486), f'{character["infection"]} / 5', fill=status_accent, font=_font(s(20), True))
+        draw.text(point(267, 486), f'{character["infection"]} / {character.get("infection_max", 5)}', fill=status_accent, font=_font(s(20), True))
         draw.line(rect(68, 526, 350, 526), fill=(125, 113, 91, 180), width=scale)
         draw.text(point(68, 545), "ПОЛЕВЫЕ ЗАМЕТКИ", fill=muted, font=_font(s(11), True))
         notes = (character.get("notes") or "").strip()

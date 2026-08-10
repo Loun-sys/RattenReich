@@ -150,7 +150,7 @@ def profile_embed(character: dict) -> discord.Embed:
     embed.description = f'**{rank}** · {character["race"]} · {character["class_name"]}'
     stats = "\n".join(f'**{name}:** {value["current"]}/{value["max"]}' for name, value in character["attributes"].items())
     embed.add_field(name="Характеристики", value=stats, inline=True)
-    embed.add_field(name="Состояние", value=f'**Воля:** {character["will_current"]}/{character["will_max"]}\n**Заражение:** {character["infection"]}/5\n**Бланки:** {character["supply_forms"]}', inline=True)
+    embed.add_field(name="Состояние", value=f'**Воля:** {character["will_current"]}/{character["will_max"]}\n**Заражение:** {character["infection"]}/{character.get("infection_max", 5)}\n**Бланки:** {character["supply_forms"]}', inline=True)
     embed.set_footer(text="Ratten Reich · полевой архив")
     return embed
 
@@ -243,6 +243,25 @@ def talent_skill_bonus_details(character: dict, skill: str) -> list[tuple[str, i
         value = (talent or {}).get("effects", {}).get("skill_bonus", {}).get(skill, 0)
         if value:
             details.append((f'\u0422\u0430\u043b\u0430\u043d\u0442 \u00ab{name}\u00bb', int(value)))
+    return details
+
+
+def medal_skill_bonus_details(character: dict, skill: str) -> list[tuple[str, int]]:
+    """Return capped skill dice from medals as separate roll modifiers."""
+    details: list[tuple[str, int]] = []
+    remaining = 2
+    for code in character.get("medals", []):
+        medal = MEDAL_BY_CODE.get(code)
+        if not medal or remaining <= 0:
+            continue
+        effects = medal.get("effects", {})
+        value = int(effects.get("skill_bonus", {}).get(skill, 0))
+        if skill in CLASSES.values():
+            value += int(effects.get("class_skill_bonus", 0))
+        applied = min(remaining, max(0, value))
+        if applied:
+            details.append((f'Награда «{medal["name"]}»', applied))
+            remaining -= applied
     return details
 
 
@@ -599,16 +618,19 @@ def make_pool(
     race_bonus = racial_skill_bonus(character, skill)
     talent_details = talent_skill_bonus_details(character, skill)
     talent_bonus = sum(value for _, value in talent_details)
+    medal_details = medal_skill_bonus_details(character, skill)
+    medal_bonus = sum(value for _, value in medal_details)
     vehicle_details = vehicle_skill_bonus_details(character, skill)
     vehicle_bonus = sum(value for _, value in vehicle_details)
     injury_details = injury_skill_modifier_details(character, skill)
     injury_modifier = sum(value for _, value in injury_details)
-    skill_total = permanent_skill + race_bonus + talent_bonus + vehicle_bonus + injury_modifier + custom_modifier
+    skill_total = permanent_skill + race_bonus + talent_bonus + medal_bonus + vehicle_bonus + injury_modifier + custom_modifier
     guaranteed = max(0, permanent_skill - 5) if skill in {"\u041b\u0435\u0447\u0435\u043d\u0438\u0435", "\u041e\u0431\u0440\u0430\u0449\u0435\u043d\u0438\u0435", "\u0417\u0430\u0449\u0438\u0442\u0430"} else 0
     modifier_details = []
     if race_bonus:
         modifier_details.append((f'\u0420\u0430\u0441\u0430 \u00ab{character["race"]}\u00bb', race_bonus))
     modifier_details.extend(talent_details)
+    modifier_details.extend(medal_details)
     modifier_details.extend(vehicle_details)
     modifier_details.extend(injury_details)
     if custom_modifier:
@@ -3811,7 +3833,7 @@ async def infection_command(
     delta = количество if действие.value == "add" else -количество
     before, after = await bot.db.adjust_infection(character["id"], delta)
     await interaction.response.send_message(
-        f'{участник.mention}: заражение **{before}/5 → {after}/5**.'
+        f'{участник.mention}: заражение **{before}/{character.get("infection_max", 5)} → {after}/{character.get("infection_max", 5)}**.'
     )
 
 

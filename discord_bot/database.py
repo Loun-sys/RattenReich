@@ -13,7 +13,7 @@ from catalog_loader import MEDICAL_CONSUMABLES, MULTI_USE_CONSUMABLES, catalog_p
 from attachment_data import ATTACHMENT_BY_NAME, apply_attachments, compatible
 from constants import ATTRIBUTES, CLASSES, SKILLS
 from talent_data import TALENTS
-from medal_data import MEDALS
+from medal_data import MEDALS, medal_bonus_summary
 
 
 AMMO_PACKAGE_MIGRATIONS = {
@@ -831,6 +831,16 @@ class Database:
             result["skills"] = {r["name"]: r["value"] for r in skills}
             result["talents"] = {r["name"]: r["description"] for r in talents}
             result["injuries"] = [dict(r) for r in injuries]
+            medal_rows = await db.execute_fetchall(
+                "SELECT medal_code FROM character_medals WHERE character_id=? ORDER BY awarded_at,id",
+                (result["id"],),
+            )
+            result["medals"] = [str(row["medal_code"]) for row in medal_rows]
+            medal_bonuses = medal_bonus_summary(result["medals"])
+            result["medal_bonuses"] = medal_bonuses
+            result["will_max_base"] = int(result["will_max"])
+            result["will_max"] = int(result["will_max"]) + int(medal_bonuses["will_max_bonus"])
+            result["infection_max"] = 5 + int(medal_bonuses["infection_max_bonus"])
             luck = await db.execute_fetchall("SELECT percent FROM luck_modifiers WHERE user_id=?", (user_id,))
             result["luck_percent"] = int(luck[0]["percent"]) if luck else 0
             fleet = await db.execute_fetchall(
@@ -1023,7 +1033,14 @@ class Database:
             if not rows:
                 return None
             before = int(rows[0]["infection"])
-            after = max(0, min(5, before + delta))
+            medal_rows = await db.execute_fetchall(
+                "SELECT medal_code FROM character_medals WHERE character_id=?",
+                (character_id,),
+            )
+            infection_max = 5 + int(
+                medal_bonus_summary(str(row["medal_code"]) for row in medal_rows)["infection_max_bonus"]
+            )
+            after = max(0, min(infection_max, before + delta))
             await db.execute(
                 "UPDATE characters SET infection=? WHERE id=?",
                 (after, character_id),
@@ -1246,7 +1263,17 @@ class Database:
                 (character_id, attribute, trauma.code, trauma.name, trauma.description, trauma.penalties, trauma.duration, expires_at),
             )
             if attribute in ("Телосложение", "Ловкость"):
-                await db.execute("UPDATE characters SET infection=infection+1 WHERE id=?", (character_id,))
+                medal_rows = await db.execute_fetchall(
+                    "SELECT medal_code FROM character_medals WHERE character_id=?",
+                    (character_id,),
+                )
+                infection_max = 5 + int(
+                    medal_bonus_summary(str(row["medal_code"]) for row in medal_rows)["infection_max_bonus"]
+                )
+                await db.execute(
+                    "UPDATE characters SET infection=MIN(?,infection+1) WHERE id=?",
+                    (infection_max, character_id),
+                )
             await db.commit()
 
     async def add_pending_injury(self, character_id: int, attribute: str, roll_code: int) -> None:
@@ -1256,7 +1283,17 @@ class Database:
                 (character_id, attribute, roll_code, f"Травма {attribute} ({roll_code})", "Таблица для этой характеристики ещё не загружена.", "Определяет мастер", "Определяет мастер"),
             )
             if attribute in ("Телосложение", "Ловкость"):
-                await db.execute("UPDATE characters SET infection=infection+1 WHERE id=?", (character_id,))
+                medal_rows = await db.execute_fetchall(
+                    "SELECT medal_code FROM character_medals WHERE character_id=?",
+                    (character_id,),
+                )
+                infection_max = 5 + int(
+                    medal_bonus_summary(str(row["medal_code"]) for row in medal_rows)["infection_max_bonus"]
+                )
+                await db.execute(
+                    "UPDATE characters SET infection=MIN(?,infection+1) WHERE id=?",
+                    (infection_max, character_id),
+                )
             await db.commit()
 
     async def list_rows(self, table: str, character_id: int) -> list[dict[str, Any]]:
@@ -1343,6 +1380,19 @@ class Database:
             cursor = await db.execute(
                 "DELETE FROM character_medals WHERE character_id=? AND medal_code=?", (character_id, medal_code)
             )
+            if cursor.rowcount:
+                remaining = await db.execute_fetchall(
+                    "SELECT medal_code FROM character_medals WHERE character_id=?",
+                    (character_id,),
+                )
+                bonuses = medal_bonus_summary(str(row["medal_code"]) for row in remaining)
+                await db.execute(
+                    """UPDATE characters
+                       SET will_current=MIN(will_current,will_max+?),
+                           infection=MIN(infection,5+?)
+                       WHERE id=?""",
+                    (bonuses["will_max_bonus"], bonuses["infection_max_bonus"], character_id),
+                )
             await db.commit()
             return cursor.rowcount > 0
 
