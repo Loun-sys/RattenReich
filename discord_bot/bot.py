@@ -25,6 +25,7 @@ from constants import ATTRIBUTES, CLASSES, ITEM_CATEGORIES, ITEM_SIZES, RACES, R
 from database import Database
 from trauma_data import MENTAL_TRAUMAS, PHYSICAL_TRAUMAS, SOCIAL_TRAUMAS
 from talent_data import CLASS_TALENTS, TALENTS, TALENT_BY_NAME
+from medal_data import MEDALS, MEDAL_BY_CODE
 
 ROOT = Path(__file__).resolve().parent
 load_dotenv(ROOT / ".env")
@@ -2821,6 +2822,64 @@ class CharacterPanel(discord.ui.View):
             ephemeral=True,
         )
 
+    @discord.ui.button(label="Досье", emoji="🎖️", style=discord.ButtonStyle.primary, custom_id="rr:dossier", row=3)
+    async def dossier(self, interaction: discord.Interaction, _: discord.ui.Button):
+        character = await get_character(interaction)
+        if character:
+            await send_dossier(interaction, character)
+
+
+class MedalSelect(discord.ui.Select):
+    def __init__(self, view: "DossierView", medals: list[dict]):
+        self.dossier_view = view
+        super().__init__(placeholder="Прочитать о награде", options=[discord.SelectOption(label=m["name"][:100], value=m["code"]) for m in medals[:25]], row=0)
+
+    async def callback(self, interaction: discord.Interaction):
+        medal = next((item for item in self.dossier_view.medals if item["code"] == self.values[0]), None)
+        if not medal:
+            await interaction.response.send_message("Награда не найдена.", ephemeral=True)
+            return
+        awarded_at = str(medal["awarded_at"]).replace("T", " ")[:16]
+        embed = discord.Embed(title=f'🎖️ {medal["name"]}', description=medal["description"], color=0x9B6A2F)
+        embed.add_field(name="За что получена", value=short(medal["reason"], 1024), inline=False)
+        embed.add_field(name="Эффект", value=short(medal["effect"], 1024), inline=False)
+        embed.add_field(name="Дата приказа", value=f"{awarded_at} UTC", inline=True)
+        embed.add_field(name="Выдал", value=f'<@{medal["awarded_by"]}>', inline=True)
+        embed.set_footer(text="Ratten Reich · наградной архив")
+        await interaction.response.send_message(embed=embed, ephemeral=True)
+
+
+class DossierView(discord.ui.View):
+    def __init__(self, character: dict, medals: list[dict], page: int = 0):
+        super().__init__(timeout=300)
+        self.character, self.medals, self.page, self.per_page = character, medals, page, 8
+        pages = max(1, (len(medals) + self.per_page - 1) // self.per_page)
+        self.page = max(0, min(page, pages - 1))
+        if medals:
+            self.add_item(MedalSelect(self, medals))
+        self.previous.disabled = self.page == 0
+        self.next.disabled = self.page >= pages - 1
+
+    async def refresh(self, interaction: discord.Interaction):
+        image = bot.renderer.render_dossier(self.character, self.medals, self.page, self.per_page)
+        await interaction.response.edit_message(attachments=[discord.File(image, filename="наградное-досье.png")], view=DossierView(self.character, self.medals, self.page))
+
+    @discord.ui.button(label="←", style=discord.ButtonStyle.secondary, row=1)
+    async def previous(self, interaction: discord.Interaction, _: discord.ui.Button):
+        self.page -= 1
+        await self.refresh(interaction)
+
+    @discord.ui.button(label="→", style=discord.ButtonStyle.secondary, row=1)
+    async def next(self, interaction: discord.Interaction, _: discord.ui.Button):
+        self.page += 1
+        await self.refresh(interaction)
+
+
+async def send_dossier(interaction: discord.Interaction, character: dict) -> None:
+    medals = await bot.db.medals(character["id"])
+    image = bot.renderer.render_dossier(character, medals)
+    await interaction.response.send_message(file=discord.File(image, filename="наградное-досье.png"), view=DossierView(character, medals))
+
 async def apply_push_cost(pool: RollPool, character: dict) -> list[str]:
     messages: list[str] = []
     inventory_by_id = {item["id"]: item for item in await bot.db.inventory(character["id"])}
@@ -3309,6 +3368,50 @@ async def character_panel(interaction: discord.Interaction, участник: di
         file=discord.File(image, filename="личное-дело.png"),
         view=CharacterPanel(bot, owner_id=owner.id),
     )
+
+
+@bot.tree.command(name="досье", description="Открыть наградное досье персонажа")
+@app_commands.describe(участник="Чьё наградное досье открыть; если не указан — ваше")
+async def dossier_command(interaction: discord.Interaction, участник: discord.Member | None = None):
+    owner = участник or interaction.user
+    if not interaction.guild_id:
+        await interaction.response.send_message("Досье доступно только на сервере.", ephemeral=True)
+        return
+    character = await bot.db.character(interaction.guild_id, owner.id)
+    if not character:
+        await interaction.response.send_message("У выбранного участника нет персонажа.", ephemeral=True)
+        return
+    await send_dossier(interaction, character)
+
+
+@bot.tree.command(name="медаль-выдать", description="Выдать персонажу медаль и занести основание в досье")
+@app_commands.describe(участник="Кого наградить", медаль="Награда", основание="За что выдана медаль")
+@app_commands.choices(медаль=[app_commands.Choice(name=item["name"], value=item["code"]) for item in MEDALS])
+@app_commands.check(require_master_access)
+async def medal_award_command(interaction: discord.Interaction, участник: discord.Member, медаль: app_commands.Choice[str], основание: app_commands.Range[str, 3, 500]):
+    character = await bot.db.character(interaction.guild_id, участник.id)
+    if not character:
+        await interaction.response.send_message("У выбранного участника нет персонажа.", ephemeral=True)
+        return
+    success, message = await bot.db.award_medal(character["id"], медаль.value, основание, interaction.user.id)
+    if not success:
+        await interaction.response.send_message(message, ephemeral=True)
+        return
+    await interaction.response.send_message(f'🎖️ {участник.mention} награждён медалью **«{message}»**.\n**Основание:** {основание}')
+
+
+@bot.tree.command(name="медаль-забрать", description="Удалить медаль из наградного досье персонажа")
+@app_commands.describe(участник="У кого отозвать награду", медаль="Медаль")
+@app_commands.choices(медаль=[app_commands.Choice(name=item["name"], value=item["code"]) for item in MEDALS])
+@app_commands.check(require_master_access)
+async def medal_revoke_command(interaction: discord.Interaction, участник: discord.Member, медаль: app_commands.Choice[str]):
+    character = await bot.db.character(interaction.guild_id, участник.id)
+    if not character:
+        await interaction.response.send_message("У выбранного участника нет персонажа.", ephemeral=True)
+        return
+    deleted = await bot.db.revoke_medal(character["id"], медаль.value)
+    name = MEDAL_BY_CODE[медаль.value]["name"]
+    await interaction.response.send_message(f'Медаль **«{name}»** удалена из досье {участник.mention}.' if deleted else "У персонажа нет этой медали.", ephemeral=not deleted)
 
 
 @bot.tree.command(name="инвентарь", description="Показать инвентарь выбранного персонажа")

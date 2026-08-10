@@ -13,6 +13,7 @@ from catalog_loader import MEDICAL_CONSUMABLES, MULTI_USE_CONSUMABLES, catalog_p
 from attachment_data import ATTACHMENT_BY_NAME, apply_attachments, compatible
 from constants import ATTRIBUTES, CLASSES, SKILLS
 from talent_data import TALENTS
+from medal_data import MEDALS
 
 
 AMMO_PACKAGE_MIGRATIONS = {
@@ -193,6 +194,24 @@ CREATE TABLE IF NOT EXISTS character_effects (
     created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 CREATE INDEX IF NOT EXISTS idx_effects_character ON character_effects(character_id, expires_at);
+CREATE TABLE IF NOT EXISTS medal_catalog (
+    code TEXT PRIMARY KEY,
+    name TEXT NOT NULL UNIQUE,
+    description TEXT NOT NULL DEFAULT '',
+    effect TEXT NOT NULL DEFAULT '',
+    ribbon TEXT NOT NULL DEFAULT '7A1F24',
+    metal TEXT NOT NULL DEFAULT 'C9A54A'
+);
+CREATE TABLE IF NOT EXISTS character_medals (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    character_id INTEGER NOT NULL REFERENCES characters(id) ON DELETE CASCADE,
+    medal_code TEXT NOT NULL REFERENCES medal_catalog(code) ON DELETE RESTRICT,
+    reason TEXT NOT NULL,
+    awarded_by INTEGER NOT NULL,
+    awarded_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE(character_id, medal_code)
+);
+CREATE INDEX IF NOT EXISTS idx_character_medals_character ON character_medals(character_id, awarded_at);
 CREATE TABLE IF NOT EXISTS npcs (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     guild_id INTEGER NOT NULL,
@@ -334,6 +353,15 @@ class Database:
                 await db.execute(
                     "UPDATE talents SET description=? WHERE lower(name)=lower(?)",
                     (talent["description"], talent["name"]),
+                )
+            for medal in MEDALS:
+                await db.execute(
+                    """INSERT INTO medal_catalog(code,name,description,effect,ribbon,metal)
+                       VALUES(?,?,?,?,?,?)
+                       ON CONFLICT(code) DO UPDATE SET
+                         name=excluded.name,description=excluded.description,effect=excluded.effect,
+                         ribbon=excluded.ribbon,metal=excluded.metal""",
+                    (medal["code"], medal["name"], medal["description"], medal["effect"], medal["ribbon"], medal["metal"]),
                 )
             medical_price_migration = "medical_consumable_prices_2026_07_31"
             applied = await db.execute_fetchall(
@@ -1265,6 +1293,41 @@ class Database:
                        ORDER BY id LIMIT 1
                    )""",
                 (character_id, roll_code, *attributes),
+            )
+            await db.commit()
+            return cursor.rowcount > 0
+
+    async def medals(self, character_id: int) -> list[dict[str, Any]]:
+        async with self.connect() as db:
+            rows = await db.execute_fetchall(
+                """SELECT character_medals.id,character_medals.reason,character_medals.awarded_by,
+                          character_medals.awarded_at,medal_catalog.*
+                   FROM character_medals JOIN medal_catalog ON medal_catalog.code=character_medals.medal_code
+                   WHERE character_medals.character_id=?
+                   ORDER BY character_medals.awarded_at,character_medals.id""",
+                (character_id,),
+            )
+            return [dict(row) for row in rows]
+
+    async def award_medal(self, character_id: int, medal_code: str, reason: str, awarded_by: int) -> tuple[bool, str]:
+        async with self.connect() as db:
+            medal = await db.execute_fetchall("SELECT name FROM medal_catalog WHERE code=?", (medal_code,))
+            if not medal:
+                return False, "Неизвестная медаль."
+            try:
+                await db.execute(
+                    "INSERT INTO character_medals(character_id,medal_code,reason,awarded_by) VALUES(?,?,?,?)",
+                    (character_id, medal_code, reason.strip(), awarded_by),
+                )
+                await db.commit()
+            except aiosqlite.IntegrityError:
+                return False, "У персонажа уже есть эта медаль."
+            return True, str(medal[0]["name"])
+
+    async def revoke_medal(self, character_id: int, medal_code: str) -> bool:
+        async with self.connect() as db:
+            cursor = await db.execute(
+                "DELETE FROM character_medals WHERE character_id=? AND medal_code=?", (character_id, medal_code)
             )
             await db.commit()
             return cursor.rowcount > 0

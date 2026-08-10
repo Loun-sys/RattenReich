@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import math
 from functools import lru_cache
 from io import BytesIO
 from pathlib import Path
@@ -109,6 +110,15 @@ def _draw_notes(draw: ImageDraw.ImageDraw, text: str, box: tuple[int, int, int, 
         draw.text((left, top + index * line_height), line, fill=fill, font=font)
 
 
+def _star_points(cx: int, cy: int, outer: int, inner: int) -> list[tuple[float, float]]:
+    points = []
+    for index in range(10):
+        radius = outer if index % 2 == 0 else inner
+        angle = -math.pi / 2 + index * math.pi / 5
+        points.append((cx + math.cos(angle) * radius, cy + math.sin(angle) * radius))
+    return points
+
+
 class CardRenderer:
     def __init__(self, assets_dir: Path):
         self.assets_dir = assets_dir
@@ -169,6 +179,48 @@ class CardRenderer:
         else:
             _rotated_centered_text(image, "ФОТО ОТСУТСТВУЕТ", center=point(500, 578), width=s(185), angle=20, size=s(12), fill=(105, 98, 84, 210), bold=True)
 
+        output = BytesIO()
+        image.convert("RGB").save(output, "PNG", optimize=True)
+        output.seek(0)
+        return output
+
+    def render_dossier(self, character: dict, medals: list[dict], page: int = 0, per_page: int = 8) -> BytesIO:
+        width, height = 1200, 760
+        image = Image.new("RGBA", (width, height), (206, 196, 171, 255))
+        draw = ImageDraw.Draw(image)
+        for y in range(0, height, 7):
+            shade = 190 + ((y * 17) % 18)
+            draw.line((0, y, width, y), fill=(shade, shade - 7, shade - 22, 35), width=1)
+        draw.rectangle((28, 26, width - 28, height - 26), outline=(78, 64, 47, 255), width=3)
+        draw.rectangle((39, 37, width - 39, height - 37), outline=(117, 98, 70, 180), width=1)
+        draw.text((70, 58), "НАГРАДНОЕ ДОСЬЕ", fill=(55, 47, 38, 255), font=_font(35, True))
+        rank = RANKS[max(0, min(len(RANKS) - 1, int(character["rank_index"])))]
+        full_name = f'{character["surname"]} {character["name"]}'
+        draw.text((72, 115), full_name, fill=(55, 47, 38, 255), font=_fit_text(draw, full_name, 650, 27, True))
+        detail = f'{rank} · {character["class_name"]} · {character["race"]}'
+        draw.text((72, 153), detail, fill=(88, 77, 62, 255), font=_fit_text(draw, detail, 650, 18))
+        draw.line((70, 190, 1130, 190), fill=(98, 80, 58, 210), width=2)
+        pages = max(1, (len(medals) + per_page - 1) // per_page)
+        page = max(0, min(page, pages - 1))
+        shown = medals[page * per_page:(page + 1) * per_page]
+        if not shown:
+            draw.text((70, 240), "Награды отсутствуют", fill=(112, 99, 79, 210), font=_font(24, True))
+            draw.text((70, 282), "В деле пока нет приказов о награждении.", fill=(112, 99, 79, 210), font=_font(17))
+        for index, medal in enumerate(shown):
+            col, row = index % 4, index // 4
+            x, y = 88 + col * 270, 225 + row * 230
+            ribbon = tuple(int(medal["ribbon"][i:i + 2], 16) for i in (0, 2, 4)) + (255,)
+            metal = tuple(int(medal["metal"][i:i + 2], 16) for i in (0, 2, 4)) + (255,)
+            draw.rectangle((x + 54, y, x + 146, y + 56), fill=ribbon, outline=(52, 43, 34, 255), width=2)
+            draw.polygon(((x + 62, y + 56), (x + 92, y + 107), (x + 122, y + 56)), fill=ribbon)
+            draw.ellipse((x + 58, y + 82, x + 142, y + 166), fill=metal, outline=(60, 51, 39, 255), width=3)
+            draw.ellipse((x + 72, y + 96, x + 128, y + 152), outline=(245, 235, 190, 210), width=3)
+            draw.polygon(_star_points(x + 100, y + 124, 17, 7), fill=(61, 49, 36, 255))
+            lines = _wrapped_lines(draw, medal["name"], _font(15, True), 225)
+            for line_index, line in enumerate(lines[:2]):
+                draw.text((x + 100, y + 176 + line_index * 18), line, anchor="ma", fill=(55, 47, 38, 255), font=_font(15, True))
+        draw.text((70, 705), f"Наград: {len(medals)}", fill=(88, 77, 62, 255), font=_font(14, True))
+        draw.text((1130, 705), f"Лист {page + 1}/{pages}", anchor="ra", fill=(88, 77, 62, 255), font=_font(14, True))
         output = BytesIO()
         image.convert("RGB").save(output, "PNG", optimize=True)
         output.seek(0)
