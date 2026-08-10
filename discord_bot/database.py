@@ -1996,7 +1996,9 @@ class Database:
                    ORDER BY inventory.equipped,inventory.id""",
                 (sender_id, name),
             )
-            available = [row for row in rows if not row["equipped"]]
+            # catalog_loader expects a normal mapping with .get(); aiosqlite.Row
+            # only supports subscription and used to crash every item transfer.
+            available = [dict(row) for row in rows if not row["equipped"]]
             if sum(int(row["quantity"]) for row in available) < quantity:
                 await db.rollback()
                 return False, "Предмета нет в нужном количестве или он экипирован."

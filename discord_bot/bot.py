@@ -1478,6 +1478,9 @@ class InventoryActionsView(discord.ui.View):
         self.category = category
         self.selected_id: int | None = None
         self.items = {int(item["id"]): item for item in items}
+        # Players may equip, unequip and delete their own items, but issuing
+        # catalog items belongs exclusively to /админ-инвентарь.
+        super().remove_item(self.add_item)
         visible, self.page, self.page_count = inventory_page_items(items, category, page)
         if visible:
             super().add_item(InventoryItemSelect(self, visible))
@@ -3511,18 +3514,37 @@ async def medal_revoke_autocomplete(interaction: discord.Interaction, current: s
     return await medal_autocomplete(interaction, current)
 
 
-@bot.tree.command(name="инвентарь", description="Показать инвентарь выбранного персонажа")
-@app_commands.check(require_master_access)
-async def inventory_command(interaction: discord.Interaction, участник: discord.Member):
-    character = await bot.db.character(interaction.guild_id, участник.id)
+@bot.tree.command(name="инвентарь", description="Открыть публичный инвентарь персонажа")
+@app_commands.describe(участник="Чей инвентарь открыть; если не указан — ваш")
+async def inventory_command(
+    interaction: discord.Interaction,
+    участник: discord.Member | None = None,
+):
+    await interaction.response.defer(thinking=True)
+    owner = участник or interaction.user
+    character = await bot.db.character(interaction.guild_id, owner.id)
     if not character:
-        await interaction.response.send_message("У выбранного участника нет персонажа.", ephemeral=True)
+        await interaction.edit_original_response(content="У выбранного участника нет персонажа.")
         return
     items = await bot.db.inventory(character["id"])
-    await interaction.response.send_message(
+    await interaction.edit_original_response(
+        embed=await build_inventory_embed(character),
+        view=InventoryActionsView(character, items),
+    )
+
+
+@bot.tree.command(name="админ-инвентарь", description="Администратор: выдать или удалить предмет")
+@app_commands.check(require_master_access)
+async def admin_inventory_command(interaction: discord.Interaction, участник: discord.Member):
+    await interaction.response.defer(ephemeral=True, thinking=True)
+    character = await bot.db.character(interaction.guild_id, участник.id)
+    if not character:
+        await interaction.edit_original_response(content="У выбранного участника нет персонажа.")
+        return
+    items = await bot.db.inventory(character["id"])
+    await interaction.edit_original_response(
         embed=await build_inventory_embed(character),
         view=AdminInventoryActionsView(character, items),
-        ephemeral=True,
     )
 
 
