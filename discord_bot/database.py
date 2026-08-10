@@ -197,6 +197,7 @@ CREATE INDEX IF NOT EXISTS idx_effects_character ON character_effects(character_
 CREATE TABLE IF NOT EXISTS medal_catalog (
     code TEXT PRIMARY KEY,
     name TEXT NOT NULL UNIQUE,
+    image TEXT NOT NULL DEFAULT '',
     description TEXT NOT NULL DEFAULT '',
     effect TEXT NOT NULL DEFAULT '',
     ribbon TEXT NOT NULL DEFAULT '7A1F24',
@@ -276,6 +277,9 @@ class Database:
                 await db.execute("ALTER TABLE characters ADD COLUMN rat_recovery_at TEXT")
             if "skills_initialized" not in character_columns:
                 await db.execute("ALTER TABLE characters ADD COLUMN skills_initialized INTEGER NOT NULL DEFAULT 1")
+            medal_columns = {row["name"] for row in await db.execute_fetchall("PRAGMA table_info(medal_catalog)")}
+            if "image" not in medal_columns:
+                await db.execute("ALTER TABLE medal_catalog ADD COLUMN image TEXT NOT NULL DEFAULT ''")
             inventory_columns = {row["name"] for row in await db.execute_fetchall("PRAGMA table_info(inventory)")}
             if "equipped" not in inventory_columns:
                 await db.execute("ALTER TABLE inventory ADD COLUMN equipped INTEGER NOT NULL DEFAULT 0")
@@ -354,14 +358,24 @@ class Database:
                     "UPDATE talents SET description=? WHERE lower(name)=lower(?)",
                     (talent["description"], talent["name"]),
                 )
+            medal_codes = tuple(medal["code"] for medal in MEDALS)
+            medal_placeholders = ",".join("?" for _ in medal_codes)
+            await db.execute(
+                f"DELETE FROM character_medals WHERE medal_code NOT IN ({medal_placeholders})",
+                medal_codes,
+            )
+            await db.execute(
+                f"DELETE FROM medal_catalog WHERE code NOT IN ({medal_placeholders})",
+                medal_codes,
+            )
             for medal in MEDALS:
                 await db.execute(
-                    """INSERT INTO medal_catalog(code,name,description,effect,ribbon,metal)
-                       VALUES(?,?,?,?,?,?)
+                    """INSERT INTO medal_catalog(code,name,image,description,effect)
+                       VALUES(?,?,?,?,?)
                        ON CONFLICT(code) DO UPDATE SET
-                         name=excluded.name,description=excluded.description,effect=excluded.effect,
-                         ribbon=excluded.ribbon,metal=excluded.metal""",
-                    (medal["code"], medal["name"], medal["description"], medal["effect"], medal["ribbon"], medal["metal"]),
+                         name=excluded.name,image=excluded.image,
+                         description=excluded.description,effect=excluded.effect""",
+                    (medal["code"], medal["name"], medal["image"], medal["description"], medal["effect"]),
                 )
             medical_price_migration = "medical_consumable_prices_2026_07_31"
             applied = await db.execute_fetchall(

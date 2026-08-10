@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import os
-import math
 from functools import lru_cache
 from io import BytesIO
 from pathlib import Path
@@ -110,15 +109,6 @@ def _draw_notes(draw: ImageDraw.ImageDraw, text: str, box: tuple[int, int, int, 
         draw.text((left, top + index * line_height), line, fill=fill, font=font)
 
 
-def _star_points(cx: int, cy: int, outer: int, inner: int) -> list[tuple[float, float]]:
-    points = []
-    for index in range(10):
-        radius = outer if index % 2 == 0 else inner
-        angle = -math.pi / 2 + index * math.pi / 5
-        points.append((cx + math.cos(angle) * radius, cy + math.sin(angle) * radius))
-    return points
-
-
 class CardRenderer:
     def __init__(self, assets_dir: Path):
         self.assets_dir = assets_dir
@@ -209,16 +199,17 @@ class CardRenderer:
         for index, medal in enumerate(shown):
             col, row = index % 4, index // 4
             x, y = 88 + col * 270, 225 + row * 230
-            ribbon = tuple(int(medal["ribbon"][i:i + 2], 16) for i in (0, 2, 4)) + (255,)
-            metal = tuple(int(medal["metal"][i:i + 2], 16) for i in (0, 2, 4)) + (255,)
-            draw.rectangle((x + 54, y, x + 146, y + 56), fill=ribbon, outline=(52, 43, 34, 255), width=2)
-            draw.polygon(((x + 62, y + 56), (x + 92, y + 107), (x + 122, y + 56)), fill=ribbon)
-            draw.ellipse((x + 58, y + 82, x + 142, y + 166), fill=metal, outline=(60, 51, 39, 255), width=3)
-            draw.ellipse((x + 72, y + 96, x + 128, y + 152), outline=(245, 235, 190, 210), width=3)
-            draw.polygon(_star_points(x + 100, y + 124, 17, 7), fill=(61, 49, 36, 255))
+            draw.rounded_rectangle((x - 8, y - 8, x + 228, y + 143), radius=8, fill=(232, 225, 204, 115), outline=(117, 98, 70, 120), width=1)
+            medal_path = self.assets_dir / "medals" / medal["image"]
+            if medal_path.is_file():
+                artwork = Image.open(medal_path).convert("RGBA")
+                artwork = ImageOps.contain(artwork, (220, 125), method=Image.Resampling.LANCZOS)
+                image.alpha_composite(artwork, (x + (220 - artwork.width) // 2, y + (125 - artwork.height) // 2))
+            else:
+                draw.text((x + 110, y + 54), "ИЗОБРАЖЕНИЕ НЕДОСТУПНО", anchor="ma", fill=(112, 99, 79, 210), font=_font(11, True))
             lines = _wrapped_lines(draw, medal["name"], _font(15, True), 225)
             for line_index, line in enumerate(lines[:2]):
-                draw.text((x + 100, y + 176 + line_index * 18), line, anchor="ma", fill=(55, 47, 38, 255), font=_font(15, True))
+                draw.text((x + 110, y + 160 + line_index * 18), line, anchor="ma", fill=(55, 47, 38, 255), font=_font(15, True))
         draw.text((70, 705), f"Наград: {len(medals)}", fill=(88, 77, 62, 255), font=_font(14, True))
         draw.text((1130, 705), f"Лист {page + 1}/{pages}", anchor="ra", fill=(88, 77, 62, 255), font=_font(14, True))
         output = BytesIO()

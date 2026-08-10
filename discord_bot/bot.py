@@ -2856,7 +2856,8 @@ class DossierView(discord.ui.View):
         pages = max(1, (len(medals) + self.per_page - 1) // self.per_page)
         self.page = max(0, min(page, pages - 1))
         if medals:
-            self.add_item(MedalSelect(self, medals))
+            shown = medals[self.page * self.per_page:(self.page + 1) * self.per_page]
+            self.add_item(MedalSelect(self, shown))
         self.previous.disabled = self.page == 0
         self.next.disabled = self.page >= pages - 1
 
@@ -3386,14 +3387,16 @@ async def dossier_command(interaction: discord.Interaction, участник: di
 
 @bot.tree.command(name="медаль-выдать", description="Выдать персонажу медаль и занести основание в досье")
 @app_commands.describe(участник="Кого наградить", медаль="Награда", основание="За что выдана медаль")
-@app_commands.choices(медаль=[app_commands.Choice(name=item["name"], value=item["code"]) for item in MEDALS])
 @app_commands.check(require_master_access)
-async def medal_award_command(interaction: discord.Interaction, участник: discord.Member, медаль: app_commands.Choice[str], основание: app_commands.Range[str, 3, 500]):
+async def medal_award_command(interaction: discord.Interaction, участник: discord.Member, медаль: str, основание: app_commands.Range[str, 3, 500]):
     character = await bot.db.character(interaction.guild_id, участник.id)
     if not character:
         await interaction.response.send_message("У выбранного участника нет персонажа.", ephemeral=True)
         return
-    success, message = await bot.db.award_medal(character["id"], медаль.value, основание, interaction.user.id)
+    if медаль not in MEDAL_BY_CODE:
+        await interaction.response.send_message("Выберите награду из подсказок команды.", ephemeral=True)
+        return
+    success, message = await bot.db.award_medal(character["id"], медаль, основание, interaction.user.id)
     if not success:
         await interaction.response.send_message(message, ephemeral=True)
         return
@@ -3402,16 +3405,37 @@ async def medal_award_command(interaction: discord.Interaction, участник
 
 @bot.tree.command(name="медаль-забрать", description="Удалить медаль из наградного досье персонажа")
 @app_commands.describe(участник="У кого отозвать награду", медаль="Медаль")
-@app_commands.choices(медаль=[app_commands.Choice(name=item["name"], value=item["code"]) for item in MEDALS])
 @app_commands.check(require_master_access)
-async def medal_revoke_command(interaction: discord.Interaction, участник: discord.Member, медаль: app_commands.Choice[str]):
+async def medal_revoke_command(interaction: discord.Interaction, участник: discord.Member, медаль: str):
     character = await bot.db.character(interaction.guild_id, участник.id)
     if not character:
         await interaction.response.send_message("У выбранного участника нет персонажа.", ephemeral=True)
         return
-    deleted = await bot.db.revoke_medal(character["id"], медаль.value)
-    name = MEDAL_BY_CODE[медаль.value]["name"]
+    if медаль not in MEDAL_BY_CODE:
+        await interaction.response.send_message("Выберите награду из подсказок команды.", ephemeral=True)
+        return
+    deleted = await bot.db.revoke_medal(character["id"], медаль)
+    name = MEDAL_BY_CODE[медаль]["name"]
     await interaction.response.send_message(f'Медаль **«{name}»** удалена из досье {участник.mention}.' if deleted else "У персонажа нет этой медали.", ephemeral=not deleted)
+
+
+async def medal_autocomplete(interaction: discord.Interaction, current: str):
+    query = current.casefold().strip()
+    return [
+        app_commands.Choice(name=item["name"][:100], value=item["code"])
+        for item in MEDALS
+        if not query or query in item["name"].casefold()
+    ][:25]
+
+
+@medal_award_command.autocomplete("медаль")
+async def medal_award_autocomplete(interaction: discord.Interaction, current: str):
+    return await medal_autocomplete(interaction, current)
+
+
+@medal_revoke_command.autocomplete("медаль")
+async def medal_revoke_autocomplete(interaction: discord.Interaction, current: str):
+    return await medal_autocomplete(interaction, current)
 
 
 @bot.tree.command(name="инвентарь", description="Показать инвентарь выбранного персонажа")
