@@ -273,15 +273,7 @@ def _apply_summary_overrides(items: list[dict[str, Any]], source_path: Path) -> 
             continue
         override = overrides.get(number)
         if override:
-            original_conditions = str(item.get("conditions") or "")
             item.update({key: value for key, value in override.items() if value not in ("", None)})
-            preserved = []
-            for label in ("Боеприпас", "Совместимо", "Допуск"):
-                match = re.search(rf"(?:^|;\s*)({label}:\s*[^;]+)", original_conditions, re.IGNORECASE)
-                if match and not re.search(rf"(?:^|;\s*){label}:", str(item.get("conditions") or ""), re.IGNORECASE):
-                    preserved.append(match.group(1).strip())
-            if preserved:
-                item["conditions"] = "; ".join(part for part in (str(item.get("conditions") or "").strip(), *preserved) if part)
             item["description"] = item["conditions"]
             if item["category"] == "Броня":
                 item["max_durability"] = max(1, int(item.get("defense") or 0))
@@ -393,7 +385,7 @@ def load_catalog(path: Path) -> list[dict[str, Any]]:
                 "damage_type": row.get("Тип урона") or "",
                 "defense": defense,
                 "use_range": row.get("Дистанция") or None,
-                "ammo_max": _integer(row.get("Боезапас") or row.get("Вместимость", ""), 0) or None,
+                "ammo_max": _integer(row.get("Боезапас", ""), 0) or None,
                 "fire_rate": _integer(row.get("Скорострельность", ""), 0) or None,
                 "price": _integer(row.get("Цена", ""), 0),
                 "access": access,
@@ -420,4 +412,14 @@ def load_catalog(path: Path) -> list[dict[str, Any]]:
             "access": attachment["access"], "properties": f'Слот: {attachment["slot"]}; Совместимость: {attachment["kinds"]}',
             "conditions": attachment["effect"], "description": attachment["effect"], "armor_slot": None,
         })
+    prosthetic_path = path.parent / "prosthetic_data.json"
+    if not prosthetic_path.exists():
+        prosthetic_path = path.parent / "discord_bot" / "prosthetic_data.json"
+    if prosthetic_path.exists():
+        for prosthetic in json.loads(prosthetic_path.read_text(encoding="utf-8")).get("items", []):
+            result.append({
+                **prosthetic, "gear": 0, "hands": 0, "damage": 0, "damage_type": "",
+                "defense": 0, "use_range": None, "ammo_max": None, "fire_rate": None,
+                "armor_slot": None,
+            })
     return [_balance_item(item) for item in result]

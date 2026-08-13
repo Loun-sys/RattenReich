@@ -1,0 +1,10 @@
+{
+  "name": "ratten-reich-activity",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "scripts": {"build": "vite build"},
+  "dependencies": {"@discord/embedded-app-sdk": "^2.4.0"},
+  "devDependencies": {"vite": "^7.0.0"},
+  "pnpm": {"onlyBuiltDependencies": ["esbuild"]}
+}
