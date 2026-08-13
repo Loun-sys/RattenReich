@@ -1147,7 +1147,9 @@ async def build_inventory_embed(
         quantity = f' ×{item["quantity"]}' if int(item["quantity"]) > 1 else ""
         effect = "" if item["category"] == "Протезы" else str(item.get("description") or "").strip()
         if item["category"] == "Протезы":
-            details = [f'слот: {item.get("prosthetic_slot") or "—"}', f'макс. Воля −{int(item.get("will_cost") or 0)}'] + (["установлено"] if item["equipped"] else [])
+            details = [f'слот: {item.get("prosthetic_slot") or "—"}', f'макс. Воля −{int(item.get("will_cost") or 0)}']
+            if item["equipped"]:
+                details.append(f'установлено: {item.get("equipped_position") or item.get("prosthetic_slot") or "—"}')
         entry = f'**{item["name"]}{quantity} — {", ".join(details)}.**'
         if effect and effect != "Для использования предмет должен находиться в инвентаре персонажа.":
             entry += f'\n└─ *{effect}*'
@@ -1246,6 +1248,53 @@ def inventory_page_items(items: list[dict], category: str, page: int) -> tuple[l
     page = max(0, min(page, page_count - 1))
     start = page * INVENTORY_PAGE_SIZE
     return filtered[start:start + INVENTORY_PAGE_SIZE], page, page_count
+
+
+def prosthetic_positions(character: dict, item: dict) -> list[str]:
+    if item.get("prosthetic_slot") == "Нога":
+        return ["Правая нога", "Левая нога"]
+    if item.get("prosthetic_slot") == "Рука":
+        if character.get("race") == "Тараканы":
+            return ["Верхняя правая рука", "Верхняя левая рука", "Нижняя правая рука", "Нижняя левая рука"]
+        return ["Правая рука", "Левая рука"]
+    return []
+
+
+class ProstheticPositionSelect(discord.ui.Select):
+    def __init__(self, owner: "ProstheticPositionView", positions: list[str]):
+        self.owner_view = owner
+        super().__init__(
+            placeholder="Выберите позицию установки",
+            options=[discord.SelectOption(label=position, value=position) for position in positions],
+        )
+
+    async def callback(self, interaction: discord.Interaction):
+        success, message = await bot.db.set_equipped(
+            self.owner_view.character["id"], self.owner_view.item["id"], True, self.values[0]
+        )
+        if not success:
+            await interaction.response.send_message(message, ephemeral=True)
+            return
+        character = await bot.db.character(interaction.guild_id, self.owner_view.character["user_id"])
+        items = await bot.db.inventory(character["id"])
+        await interaction.response.edit_message(
+            embed=await build_inventory_embed(character, "Протезы", 0),
+            view=InventoryActionsView(character, items, "Протезы", 0),
+        )
+
+
+class ProstheticPositionView(discord.ui.View):
+    def __init__(self, character: dict, item: dict, positions: list[str]):
+        super().__init__(timeout=90)
+        self.character = character
+        self.item = item
+        self.add_item(ProstheticPositionSelect(self, positions))
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if interaction.user.id != self.character["user_id"]:
+            await interaction.response.send_message("Выбирать позицию может только владелец персонажа.", ephemeral=True)
+            return False
+        return True
 
 
 class PageSelect(discord.ui.Select):
@@ -1362,6 +1411,13 @@ class InventoryActionsView(discord.ui.View):
         item = self.selected_item()
         if not item:
             await interaction.response.send_message("Сначала выберите предмет в списке.", ephemeral=True)
+            return
+        positions = prosthetic_positions(self.character, item)
+        if positions:
+            await interaction.response.edit_message(
+                content=f'Куда установить **{item["name"]}**?',
+                view=ProstheticPositionView(self.character, item, positions),
+            )
             return
         success, message = await bot.db.set_equipped(self.character["id"], item["id"], True)
         if not success:

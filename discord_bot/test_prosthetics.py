@@ -39,6 +39,22 @@ async def main():
         rendered = AugmentationRenderer(Path(__file__).parent / "assets").render(equipped, inventory)
         assert len(rendered.getvalue()) > 10000
 
+        cockroach_id = await db.create_character(1, 103, "Жук", "Карл", "Окопник", "Тараканы")
+        await db.set_attributes(cockroach_id, {"Телосложение": 5, "Ловкость": 5, "Смекалка": 4, "Эмпатия": 4})
+        hand_item = next(item for item in prosthetics if item["prosthetic_slot"] == "Рука")
+        await db.give_item(cockroach_id, hand_item, 2)
+        hand_rows = [item for item in await db.inventory(cockroach_id) if item["prosthetic_slot"] == "Рука"]
+        assert (await db.set_equipped(cockroach_id, hand_rows[0]["id"], True, "Верхняя правая рука"))[0]
+        assert not (await db.set_equipped(cockroach_id, hand_rows[1]["id"], True, "Верхняя правая рука"))[0]
+        assert (await db.set_equipped(cockroach_id, hand_rows[1]["id"], True, "Нижняя левая рука"))[0]
+        tail_item = next(item for item in prosthetics if item["prosthetic_slot"] == "Хвост")
+        await db.give_item(cockroach_id, tail_item, 1)
+        tail_row = await db.inventory_item_by_name(cockroach_id, tail_item["name"])
+        assert not (await db.set_equipped(cockroach_id, tail_row["id"], True))[0]
+        cockroach = await db.character(1, 103)
+        cockroach_inventory = await db.inventory(cockroach_id)
+        assert len(AugmentationRenderer(Path(__file__).parent / "assets").render(cockroach, cockroach_inventory).getvalue()) > 10000
+
 
 if __name__ == "__main__":
     asyncio.run(main())

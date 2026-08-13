@@ -123,6 +123,7 @@ CREATE TABLE IF NOT EXISTS inventory (
     ammo INTEGER,
     quantity INTEGER NOT NULL DEFAULT 1,
     equipped INTEGER NOT NULL DEFAULT 0,
+    equipped_position TEXT,
     notes TEXT NOT NULL DEFAULT ''
 );
 CREATE INDEX IF NOT EXISTS idx_inventory_character ON inventory(character_id);
@@ -233,6 +234,8 @@ class Database:
             inventory_columns = {row["name"] for row in await db.execute_fetchall("PRAGMA table_info(inventory)")}
             if "equipped" not in inventory_columns:
                 await db.execute("ALTER TABLE inventory ADD COLUMN equipped INTEGER NOT NULL DEFAULT 0")
+            if "equipped_position" not in inventory_columns:
+                await db.execute("ALTER TABLE inventory ADD COLUMN equipped_position TEXT")
             catalog_columns = {row["name"] for row in await db.execute_fetchall("PRAGMA table_info(item_catalog)")}
             catalog_migrations = {
                 "source_number": "INTEGER",
@@ -1570,7 +1573,7 @@ class Database:
             None,
         )
 
-    async def set_equipped(self, character_id: int, row_id: int, equipped: bool) -> tuple[bool, str]:
+    async def set_equipped(self, character_id: int, row_id: int, equipped: bool, position: str | None = None) -> tuple[bool, str]:
         async with self.connect() as db:
             rows = await db.execute_fetchall(
                 """SELECT inventory.*,item_catalog.name,item_catalog.size,item_catalog.category,
@@ -1584,7 +1587,7 @@ class Database:
                 return False, "Предмет не найден"
             item = dict(rows[0])
             if not equipped:
-                await db.execute("UPDATE inventory SET equipped=0 WHERE id=?", (row_id,))
+                await db.execute("UPDATE inventory SET equipped=0,equipped_position=NULL WHERE id=?", (row_id,))
                 await db.commit()
                 return True, f'Снято: {item["name"]}'
             if int(item["durability"]) <= 0:
@@ -1593,13 +1596,34 @@ class Database:
             if item["category"] not in {"Броня", "Щит", "Оружие ближнего боя", "Оружие дальнего боя", "Протезы"} and not is_trinket:
                 return False, "Этот предмет не требует экипировки"
             equipped_rows = await db.execute_fetchall(
-                """SELECT inventory.id,item_catalog.size,item_catalog.category,item_catalog.hands,item_catalog.prosthetic_slot,item_catalog.will_cost
+                """SELECT inventory.id,inventory.equipped_position,item_catalog.size,item_catalog.category,item_catalog.hands,item_catalog.prosthetic_slot,item_catalog.will_cost
                    FROM inventory JOIN item_catalog ON item_catalog.id=inventory.item_id
                    WHERE inventory.character_id=? AND inventory.equipped=1""",
                 (character_id,),
             )
             if item["category"] == "Протезы":
-                limits = {"Рука": 2, "Нога": 2, "Глаза": 1, "Голова": 1, "Кожа": 1, "Корпус": 1, "Оружейный модуль": 1, "Хвост": 1}
+                character_rows = await db.execute_fetchall("SELECT race FROM characters WHERE id=?", (character_id,))
+                race = str(character_rows[0]["race"])
+                if race == "Тараканы" and item["prosthetic_slot"] == "Хвост":
+                    return False, "Тараканам нельзя устанавливать протез хвоста"
+                position_options = {
+                    "Рука": (["Верхняя правая рука", "Верхняя левая рука", "Нижняя правая рука", "Нижняя левая рука"] if race == "Тараканы" else ["Правая рука", "Левая рука"]),
+                    "Нога": ["Правая нога", "Левая нога"],
+                }
+                allowed_positions = position_options.get(item["prosthetic_slot"])
+                if allowed_positions:
+                    if position not in allowed_positions:
+                        return False, "Выберите конкретную позицию установки"
+                    occupied_positions = {
+                        str(row["equipped_position"])
+                        for row in equipped_rows
+                        if row["category"] == "Протезы" and int(row["id"]) != row_id
+                    }
+                    if position in occupied_positions:
+                        return False, f'Позиция «{position}» уже занята'
+                else:
+                    position = str(item["prosthetic_slot"])
+                limits = {"Рука": 4 if race == "Тараканы" else 2, "Нога": 2, "Глаза": 1, "Голова": 1, "Кожа": 1, "Корпус": 1, "Оружейный модуль": 1, "Хвост": 0 if race == "Тараканы" else 1}
                 occupied = sum(row["category"] == "Протезы" and row["prosthetic_slot"] == item["prosthetic_slot"] and int(row["id"]) != row_id for row in equipped_rows)
                 if occupied >= limits.get(item["prosthetic_slot"], 1):
                     return False, f'Все места слота «{item["prosthetic_slot"]}» уже заняты'
@@ -1625,7 +1649,7 @@ class Database:
                 )
                 if occupied + int(item["hands"] or 0) > hand_limit:
                     return False, f"Недостаточно свободных рук: занято {occupied}/{hand_limit}"
-            await db.execute("UPDATE inventory SET equipped=1 WHERE id=?", (row_id,))
+            await db.execute("UPDATE inventory SET equipped=1,equipped_position=? WHERE id=?", (position if item["category"] == "Протезы" else None, row_id))
             if item["category"] == "Протезы":
                 total = sum(int(row["will_cost"] or 0) for row in equipped_rows if row["category"] == "Протезы" and int(row["id"]) != row_id) + int(item["will_cost"] or 0)
                 await db.execute("UPDATE characters SET will_current=MIN(will_current,MAX(0,will_max-?)) WHERE id=?", (total, character_id))
