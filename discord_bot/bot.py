@@ -2667,19 +2667,18 @@ async def dossier_command(interaction: discord.Interaction, участник: di
 
 @bot.tree.command(name="медаль-выдать", description="Выдать персонажу медаль и занести основание в досье")
 @app_commands.describe(участник="Кого наградить", медаль="Награда", основание="За что выдана медаль")
-@app_commands.choices(медаль=[app_commands.Choice(name=item["name"], value=item["code"]) for item in MEDALS])
 @app_commands.check(require_master_access)
 async def medal_award_command(
     interaction: discord.Interaction,
     участник: discord.Member,
-    медаль: app_commands.Choice[str],
+    медаль: str,
     основание: app_commands.Range[str, 3, 500],
 ):
     character = await bot.db.character(interaction.guild_id, участник.id)
     if not character:
         await interaction.response.send_message("У выбранного участника нет персонажа.", ephemeral=True)
         return
-    success, message = await bot.db.award_medal(character["id"], медаль.value, основание, interaction.user.id)
+    success, message = await bot.db.award_medal(character["id"], медаль, основание, interaction.user.id)
     if not success:
         await interaction.response.send_message(message, ephemeral=True)
         return
@@ -2688,26 +2687,40 @@ async def medal_award_command(
     )
 
 
+@medal_award_command.autocomplete("медаль")
+async def medal_award_autocomplete(interaction: discord.Interaction, current: str):
+    query = current.casefold().strip()
+    return [
+        app_commands.Choice(name=str(item["name"])[:100], value=str(item["code"]))
+        for item in MEDALS
+        if not query or query in str(item["name"]).casefold()
+    ][:25]
+
+
 @bot.tree.command(name="медаль-забрать", description="Удалить медаль из наградного досье персонажа")
 @app_commands.describe(участник="У кого отозвать награду", медаль="Медаль")
-@app_commands.choices(медаль=[app_commands.Choice(name=item["name"], value=item["code"]) for item in MEDALS])
 @app_commands.check(require_master_access)
 async def medal_revoke_command(
     interaction: discord.Interaction,
     участник: discord.Member,
-    медаль: app_commands.Choice[str],
+    медаль: str,
 ):
     character = await bot.db.character(interaction.guild_id, участник.id)
     if not character:
         await interaction.response.send_message("У выбранного участника нет персонажа.", ephemeral=True)
         return
-    deleted = await bot.db.revoke_medal(character["id"], медаль.value)
-    name = MEDAL_BY_CODE[медаль.value]["name"]
+    deleted = await bot.db.revoke_medal(character["id"], медаль)
+    name = MEDAL_BY_CODE.get(медаль, {"name": медаль})["name"]
     await interaction.response.send_message(
         f'Медаль **«{name}»** удалена из досье {участник.mention}.' if deleted
         else "У персонажа нет этой медали.",
         ephemeral=not deleted,
     )
+
+
+@medal_revoke_command.autocomplete("медаль")
+async def medal_revoke_autocomplete(interaction: discord.Interaction, current: str):
+    return await medal_award_autocomplete(interaction, current)
 
 
 @bot.tree.command(name="инвентарь", description="Показать инвентарь выбранного персонажа")
