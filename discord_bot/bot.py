@@ -1431,6 +1431,10 @@ class AdminInventoryActionsView(discord.ui.View):
     async def trinket_category(self, interaction: discord.Interaction, _: discord.ui.Button):
         await self.refresh(interaction, "Безделушка", 0)
 
+    @discord.ui.button(label="Протезы", style=discord.ButtonStyle.primary, row=1)
+    async def prosthetics_category(self, interaction: discord.Interaction, _: discord.ui.Button):
+        await self.refresh(interaction, "Протезы", 0)
+
     @discord.ui.button(label="←", style=discord.ButtonStyle.secondary, row=2)
     async def previous_page(self, interaction: discord.Interaction, _: discord.ui.Button):
         await self.refresh(interaction, page=self.page - 1)
@@ -2723,9 +2727,24 @@ async def medal_revoke_autocomplete(interaction: discord.Interaction, current: s
     return await medal_award_autocomplete(interaction, current)
 
 
-@bot.tree.command(name="инвентарь", description="Показать инвентарь выбранного персонажа")
+@bot.tree.command(name="инвентарь", description="Открыть инвентарь персонажа")
+@app_commands.describe(участник="Чей инвентарь открыть; если не указан — ваш")
+async def inventory_command(interaction: discord.Interaction, участник: discord.Member | None = None):
+    owner = участник or interaction.user
+    character = await bot.db.character(interaction.guild_id, owner.id)
+    if not character:
+        await interaction.response.send_message("У выбранного участника нет персонажа.", ephemeral=True)
+        return
+    items = await bot.db.inventory(character["id"])
+    await interaction.response.send_message(
+        embed=await build_inventory_embed(character),
+        view=InventoryActionsView(character, items),
+    )
+
+
+@bot.tree.command(name="админ-инвентарь", description="Административное управление инвентарём персонажа")
 @app_commands.check(require_master_access)
-async def inventory_command(interaction: discord.Interaction, участник: discord.Member):
+async def admin_inventory_command(interaction: discord.Interaction, участник: discord.Member):
     character = await bot.db.character(interaction.guild_id, участник.id)
     if not character:
         await interaction.response.send_message("У выбранного участника нет персонажа.", ephemeral=True)

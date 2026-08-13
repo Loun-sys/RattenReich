@@ -38,13 +38,27 @@ class AugmentationRenderer:
                 return None
             path = self.icons / matches[0]
         icon = Image.open(path).convert("RGBA")
+        # The source sheets use either white or transparent corners.  A white
+        # corner becomes an ugly crescent after a circular crop, so turn only
+        # the light area connected to the outer edge into the common dark icon
+        # backing.  Bright details inside the implant remain untouched.
+        for seed in ((0, 0), (icon.width - 1, 0), (0, icon.height - 1), (icon.width - 1, icon.height - 1)):
+            pixel = icon.getpixel(seed)
+            if pixel[3] > 0 and min(pixel[:3]) >= 220:
+                ImageDraw.floodfill(icon, seed, (20, 19, 17, 255), thresh=28)
         if mirror:
             icon = ImageOps.mirror(icon)
-        icon = ImageOps.fit(icon, (diameter, diameter), Image.Resampling.LANCZOS)
+        padding = max(3, diameter // 24)
+        inner = diameter - padding * 2
+        icon = ImageOps.fit(icon, (inner, inner), Image.Resampling.LANCZOS)
+        framed = Image.new("RGBA", (diameter, diameter), (0, 0, 0, 0))
+        circle = Image.new("RGBA", (diameter, diameter), (20, 19, 17, 255))
+        framed.alpha_composite(circle)
+        framed.alpha_composite(icon, (padding, padding))
         mask = Image.new("L", (diameter, diameter), 0)
-        ImageDraw.Draw(mask).ellipse((1, 1, diameter - 2, diameter - 2), fill=255)
-        icon.putalpha(mask)
-        return icon
+        ImageDraw.Draw(mask).ellipse((2, 2, diameter - 3, diameter - 3), fill=255)
+        framed.putalpha(mask)
+        return framed
 
     def render(self, character: dict, items: list[dict]) -> BytesIO:
         image = Image.open(self.background).convert("RGBA")
@@ -52,8 +66,15 @@ class AugmentationRenderer:
         portrait = Path(str(character.get("photo_path") or ""))
         if portrait.is_file():
             photo = Image.open(portrait).convert("RGBA")
-            photo = ImageOps.contain(photo, (492, 604), Image.Resampling.LANCZOS)
-            image.alpha_composite(photo, (343 - photo.width // 2, 482 - photo.height // 2))
+            # Fill the complete portrait window. Cropping is preferable here to
+            # letterboxing: the dossier frame itself already defines the crop.
+            photo = ImageOps.fit(
+                photo,
+                (492, 604),
+                method=Image.Resampling.LANCZOS,
+                centering=(0.5, 0.5),
+            )
+            image.alpha_composite(photo, (97, 180))
 
         color = (82, 48, 39, 255)
         font = self._font(18)
@@ -69,7 +90,9 @@ class AugmentationRenderer:
         for slot, positions in self.CIRCLES.items():
             for index, item in enumerate(by_slot.get(slot, [])[:len(positions)]):
                 x, y, radius = positions[index]
-                icon = self._icon(item, radius * 2, mirror=slot in {"Рука", "Нога"} and index == 1)
+                # The left-side circles on the sheet describe the character's
+                # right limbs.  Their source art needs the mirrored variant.
+                icon = self._icon(item, radius * 2, mirror=slot in {"Рука", "Нога"} and index == 0)
                 if icon:
                     image.alpha_composite(icon, (x - radius, y - radius))
 
