@@ -38,7 +38,21 @@ class AugmentationRenderer:
         self.assets_root = assets_root
         self.background = assets_root / "augmentations-rat.png"
         self.cockroach_background = assets_root / "augmentations-cockroach.png"
+        self.canine_background = assets_root / "augmentations-canine-marsupial.png"
+        self.lizard_background = assets_root / "augmentations-monitor-agama.png"
         self.icons = assets_root / "prosthetics"
+
+    def _template_for_race(self, race: str) -> tuple[Path, bool]:
+        """Select the visual sheet while keeping the special cockroach slot map."""
+        normalized = str(race or "").strip().casefold().replace("ё", "е")
+        cockroach = "таракан" in normalized
+        if cockroach:
+            return self.cockroach_background, True
+        if any(token in normalized for token in ("псов", "сумчат")):
+            return self.canine_background, False
+        if any(token in normalized for token in ("варан", "агам")):
+            return self.lizard_background, False
+        return self.background, False
 
     def _font(self, size: int):
         for path in (Path("C:/Windows/Fonts/courbd.ttf"), Path("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf")):
@@ -70,8 +84,8 @@ class AugmentationRenderer:
         return ImageOps.fit(icon, size, Image.Resampling.LANCZOS)
 
     def render(self, character: dict, items: list[dict]) -> BytesIO:
-        cockroach = character.get("race") == "Тараканы"
-        template = Image.open(self.cockroach_background if cockroach else self.background).convert("RGBA")
+        template_path, cockroach = self._template_for_race(character.get("race", ""))
+        template = Image.open(template_path).convert("RGBA")
         image = Image.new("RGBA", template.size, (0, 0, 0, 0))
         portrait = Path(str(character.get("photo_path") or ""))
         if portrait.is_file():

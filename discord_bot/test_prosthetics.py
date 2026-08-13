@@ -55,6 +55,14 @@ async def main():
         cockroach_inventory = await db.inventory(cockroach_id)
         assert len(AugmentationRenderer(Path(__file__).parent / "assets").render(cockroach, cockroach_inventory).getvalue()) > 10000
 
+        renderer = AugmentationRenderer(Path(__file__).parent / "assets")
+        assert renderer._template_for_race("Псовые")[0].name == "augmentations-canine-marsupial.png"
+        assert renderer._template_for_race("Сумчатые")[0].name == "augmentations-canine-marsupial.png"
+        assert renderer._template_for_race("Вараны")[0].name == "augmentations-monitor-agama.png"
+        assert renderer._template_for_race("Агамы")[0].name == "augmentations-monitor-agama.png"
+        assert renderer._template_for_race("Мыши")[0].name == "augmentations-rat.png"
+        assert renderer._template_for_race("Тараканы")[1]
+
 
 if __name__ == "__main__":
     asyncio.run(main())
