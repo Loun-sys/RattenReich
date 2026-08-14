@@ -410,13 +410,13 @@ def burst_shot_modifier(shot_index: int) -> int:
     return -(max(0, int(shot_index)) * BURST_PENALTY_PER_FOLLOWUP_SHOT)
 
 
-IMPAIRMENT_SKILL_PENALTIES = {
-    "lost_left_arm": {"Стрельба": -3, "Драка": -3},
-    "lost_right_arm": {"Стрельба": -3, "Драка": -3},
-    "lost_left_leg": {"Проворство": -3, "Драка": -3},
-    "lost_right_leg": {"Проворство": -3, "Драка": -3},
-    "lost_sight": {"Стрельба": -4, "Наблюдательность": -4},
-    "lost_skin": {"Выносливость": -2},
+IMPAIRMENT_ATTRIBUTE_PENALTIES = {
+    "lost_left_arm": {"Телосложение": -5, "Ловкость": -5},
+    "lost_right_arm": {"Телосложение": -5, "Ловкость": -5},
+    "lost_left_leg": {"Телосложение": -5, "Ловкость": -5},
+    "lost_right_leg": {"Телосложение": -5, "Ловкость": -5},
+    "lost_sight": {"Смекалка": -5},
+    "lost_skin": {"Эмпатия": -5},
 }
 
 
@@ -434,16 +434,36 @@ def injury_is_compensated(character: dict, injury: dict) -> bool:
     return False
 
 
-def uncompensated_impairment_skill_modifiers(character: dict, skill: str) -> list[tuple[str, int]]:
+def has_uncompensated_impairment(character: dict, *keys: str) -> bool:
+    wanted = set(keys)
+    return any(
+        str(injury.get("impairment_key") or "") in wanted
+        and not injury_is_compensated(character, injury)
+        for injury in character.get("injuries", [])
+    )
+
+
+def uncompensated_impairment_attribute_modifiers(character: dict, attribute: str) -> list[tuple[str, int]]:
     details = []
     for injury in character.get("injuries", []):
         key = str(injury.get("impairment_key") or "")
         if not key or injury_is_compensated(character, injury):
             continue
-        modifier = IMPAIRMENT_SKILL_PENALTIES.get(key, {}).get(skill, 0)
+        modifier = IMPAIRMENT_ATTRIBUTE_PENALTIES.get(key, {}).get(attribute, 0)
         if modifier:
             details.append((f'Увечье «{injury.get("name", key)}»', modifier))
     return details
+
+
+async def apply_post_roll_impairment_cost(character: dict, attribute: str) -> list[str]:
+    if attribute not in {"Телосложение", "Ловкость"} or not has_uncompensated_impairment(character, "lost_skin"):
+        return []
+    messages = [f"**Обширная потеря кожи:** после проверки характеристики «{attribute}» получен 1 урон в Телосложение и Ловкость."]
+    current = character
+    for damaged_attribute in ("Телосложение", "Ловкость"):
+        messages.append(await apply_damage(current, damaged_attribute, 1))
+        current = await bot.db.character(current["guild_id"], current["user_id"])
+    return messages
 
 @dataclass
 class RollPool:
@@ -492,7 +512,7 @@ def make_pool(
     race_bonus = racial_skill_bonus(character, skill)
     talent_details = talent_skill_bonus_details(character, skill)
     talent_bonus = sum(value for _, value in talent_details)
-    injury_details = uncompensated_impairment_skill_modifiers(character, skill)
+    injury_details = uncompensated_impairment_attribute_modifiers(character, attribute)
     injury_modifier = sum(value for _, value in injury_details)
     skill_total = permanent_skill + race_bonus + talent_bonus + custom_modifier + injury_modifier
     guaranteed = max(0, permanent_skill - 5) if skill in {"\u041b\u0435\u0447\u0435\u043d\u0438\u0435", "\u041e\u0431\u0440\u0430\u0449\u0435\u043d\u0438\u0435", "\u0417\u0430\u0449\u0438\u0442\u0430"} else 0
@@ -2431,6 +2451,7 @@ class AttackView(discord.ui.View):
         target_attribute: str = "Телосложение",
         attacker_npc: dict | None = None,
         damage_modifier: int = 0,
+        impairment_costs: list[str] | None = None,
     ):
         super().__init__(timeout=300)
         self.attacker_id = attacker_id
@@ -2444,6 +2465,7 @@ class AttackView(discord.ui.View):
         self.target_attribute = target_attribute
         self.attacker_npc = attacker_npc
         self.damage_modifier = damage_modifier
+        self.impairment_costs = impairment_costs or []
         self.resolved = False
         self.message: discord.Message | None = None
         fire_rate = int((weapon or {}).get("fire_rate") or 1)
@@ -2492,6 +2514,12 @@ class AttackView(discord.ui.View):
                 inline=True,
             )
             embed.add_field(name="Условия оружия", value=short(self.weapon["conditions"]), inline=False)
+        if self.impairment_costs:
+            embed.add_field(
+                name="Последствия увечья",
+                value=short("\n".join(self.impairment_costs)),
+                inline=False,
+            )
         damage_factor = max(1, int(self.weapon["damage"])) if self.weapon else 1
         damage_before_defense = max(0, self.attack_successes * damage_factor + self.damage_modifier)
         modifier_text = (
@@ -3442,8 +3470,12 @@ async def skill_roll_command(
         success_modifier=success_modifier,
     )
     conditions = item["conditions"] if item else ""
+    impairment_costs = await apply_post_roll_impairment_cost(character, pool.attribute)
+    embed = pool_embed(pool, f"Проверка · {skill}", conditions)
+    if impairment_costs:
+        embed.add_field(name="Последствия увечья", value=short("\n".join(impairment_costs)), inline=False)
     await interaction.response.send_message(
-        embed=pool_embed(pool, f"Проверка · {skill}", conditions),
+        embed=embed,
         view=SkillRollView(interaction.user.id, character, pool, conditions, can_push=skill != "Стрельба"),
     )
 
@@ -3558,6 +3590,16 @@ async def send_attack(
         return
     if await reject_unfinished_skills(interaction, attacker):
         return
+    if (
+        weapon
+        and int(weapon.get("hands") or 0) >= 2
+        and has_uncompensated_impairment(attacker, "lost_left_arm", "lost_right_arm")
+    ):
+        await interaction.response.send_message(
+            "Нельзя использовать двуручное оружие: потеря руки не компенсирована подходящим протезом.",
+            ephemeral=True,
+        )
+        return
     skill = "Стрельба" if ranged else "Драка"
     if ranged:
         fire_rate = max(1, int(weapon["fire_rate"] or 1))
@@ -3630,6 +3672,12 @@ async def send_attack(
         if burst_modifier:
             pool.skill_modifier_details.append((f"Штраф очереди · выстрел №{shot_index + 1}", burst_modifier))
         pools.append(pool)
+    impairment_costs: list[str] = []
+    current_attacker = attacker
+    for pool in pools:
+        impairment_costs.extend(await apply_post_roll_impairment_cost(current_attacker, pool.attribute))
+        if impairment_costs:
+            current_attacker = await bot.db.character(interaction.guild_id, interaction.user.id)
     if npc:
         npc_current = int(npc["physique"] if target_attribute == "Телосложение" else npc["agility"])
         if npc_current <= 0:
@@ -3640,6 +3688,7 @@ async def send_attack(
             distance, distance_modifier, target_attribute,
             damage_modifier=damage_bonus - damage_penalty + automatic_damage_bonus,
             target_npc=npc,
+            impairment_costs=impairment_costs,
         )
         await interaction.response.send_message(embed=view.attack_embed(), view=view)
         view.message = await interaction.original_response()
@@ -3655,6 +3704,7 @@ async def send_attack(
         distance_modifier,
         target_attribute,
         damage_modifier=damage_bonus - damage_penalty + automatic_damage_bonus,
+        impairment_costs=impairment_costs,
     )
     await interaction.response.send_message(
         content=f"{target.mention}, по вашему персонажу проводится атака." if target else None,
@@ -3673,6 +3723,10 @@ async def weapon_choices(interaction: discord.Interaction, current: str, categor
     items = [
         item for item in await bot.db.inventory(character["id"])
         if item["equipped"] and item["durability"] > 0
+        and not (
+            int(item.get("hands") or 0) >= 2
+            and has_uncompensated_impairment(character, "lost_left_arm", "lost_right_arm")
+        )
         and (item["category"] == category or (category == "Оружие ближнего боя" and int(item.get("attachment_melee_damage") or 0) > 0))
         and current.casefold() in item["name"].casefold()
     ]

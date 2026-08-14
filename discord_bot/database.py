@@ -13,6 +13,7 @@ from attachment_data import ATTACHMENT_BY_NAME, apply_attachments, compatible
 from constants import ATTRIBUTES, CLASSES, SKILLS
 from talent_data import TALENTS
 from medal_data import MEDALS
+from trauma_data import PHYSICAL_TRAUMAS
 
 
 AMMO_PACKAGE_MIGRATIONS = {
@@ -230,6 +231,17 @@ class Database:
                 await db.execute("ALTER TABLE injuries ADD COLUMN impairment_key TEXT NOT NULL DEFAULT ''")
             if "compensation_position" not in injury_columns:
                 await db.execute("ALTER TABLE injuries ADD COLUMN compensation_position TEXT NOT NULL DEFAULT ''")
+            for roll_code in range(71, 77):
+                trauma = PHYSICAL_TRAUMAS[roll_code]
+                await db.execute(
+                    """UPDATE injuries
+                       SET name=?,description=?,penalties=?,duration=?,impairment_key=?,compensation_position=?,expires_at=NULL
+                       WHERE roll_code=?""",
+                    (
+                        trauma.name, trauma.description, trauma.penalties, trauma.duration,
+                        trauma.impairment_key, trauma.compensation_position, roll_code,
+                    ),
+                )
             character_columns = {row["name"] for row in await db.execute_fetchall("PRAGMA table_info(characters)")}
             if "hands" not in character_columns:
                 await db.execute("ALTER TABLE characters ADD COLUMN hands INTEGER NOT NULL DEFAULT 2")
@@ -1627,6 +1639,28 @@ class Database:
                    WHERE inventory.character_id=? AND inventory.equipped=1""",
                 (character_id,),
             )
+            if int(item["hands"] or 0) >= 2:
+                injuries = await db.execute_fetchall(
+                    """SELECT impairment_key,compensation_position FROM injuries
+                       WHERE character_id=? AND active=1
+                         AND (expires_at IS NULL OR expires_at>CURRENT_TIMESTAMP)
+                         AND impairment_key IN ('lost_left_arm','lost_right_arm')""",
+                    (character_id,),
+                )
+                prosthetic_positions = {
+                    str(row["equipped_position"] or row["prosthetic_slot"] or "").casefold()
+                    for row in equipped_rows if row["category"] == "Протезы"
+                }
+                for injury in injuries:
+                    required = str(injury["compensation_position"] or "").casefold()
+                    compensated = any(
+                        actual == required or (
+                            required in {"левая рука", "правая рука"} and actual.endswith(required)
+                        )
+                        for actual in prosthetic_positions
+                    )
+                    if not compensated:
+                        return False, "Нельзя экипировать двуручное оружие: потеря руки не компенсирована подходящим протезом"
             if item["category"] == "Протезы":
                 character_rows = await db.execute_fetchall("SELECT race FROM characters WHERE id=?", (character_id,))
                 race = str(character_rows[0]["race"])
