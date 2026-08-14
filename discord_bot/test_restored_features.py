@@ -7,6 +7,13 @@ from database import Database
 
 
 async def main() -> None:
+    equipped_crowbar = {
+        "category": "Оружие ближнего боя", "equipped": 1,
+        "properties": "Разрушающее, Тяжёлое", "attachment_melee_damage": 0,
+    }
+    assert bot_module.is_skill_roll_gear(equipped_crowbar, "Драка")
+    assert not bot_module.is_skill_roll_gear(equipped_crowbar, "Стрельба")
+    assert not bot_module.is_skill_roll_gear({**equipped_crowbar, "equipped": 0}, "Драка")
     with tempfile.TemporaryDirectory() as temp:
         path = Path(temp) / "restored.sqlite3"
         db = Database(path)

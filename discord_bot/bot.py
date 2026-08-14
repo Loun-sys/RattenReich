@@ -554,6 +554,21 @@ def is_general_roll_gear(item: dict) -> bool:
     )
 
 
+def is_skill_roll_gear(item: dict, skill: str) -> bool:
+    """Allow the weapon used by a combat skill in that skill's equipment field."""
+    if is_general_roll_gear(item):
+        return True
+    category = str(item.get("category") or "")
+    if skill == "Драка":
+        return bool(item.get("equipped")) and (
+            category == "Оружие ближнего боя"
+            or int(item.get("attachment_melee_damage") or 0) > 0
+        )
+    if skill == "Стрельба":
+        return bool(item.get("equipped")) and category == "Оружие дальнего боя"
+    return False
+
+
 def d6(count: int) -> list[int]:
     return [secrets.randbelow(6) + 1 for _ in range(max(0, count))]
 
@@ -4455,7 +4470,7 @@ async def skill_roll_command(
     modifier_items: list[dict] = []
     if снаряжение:
         item = await bot.db.inventory_item_by_name(character["id"], снаряжение)
-        if not item or item["durability"] <= 0 or not is_general_roll_gear(item):
+        if not item or item["durability"] <= 0 or not is_skill_roll_gear(item, skill):
             await interaction.response.send_message("Подходящее исправное снаряжение не найдено.", ephemeral=True)
             return
         gear[item["id"]] = int(item["durability"])
@@ -4645,12 +4660,13 @@ async def skill_roll_item_autocomplete(interaction: discord.Interaction, current
     character = await bot.db.character(interaction.guild_id, interaction.user.id)
     if not character:
         return []
+    selected_skill = normalize(str(getattr(interaction.namespace, "навык", "") or ""), tuple(character["skills"])) or ""
     return [
         app_commands.Choice(name=f'{item["name"]} · гир {item["durability"]}'[:100], value=item["name"])
         for item in await bot.db.inventory(character["id"])
         if current.casefold() in item["name"].casefold()
         and item["durability"] > 0
-        and is_general_roll_gear(item)
+        and is_skill_roll_gear(item, selected_skill)
     ][:25]
 
 
