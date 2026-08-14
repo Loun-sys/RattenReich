@@ -20,6 +20,21 @@ async def main() -> None:
     assert bot_module.attack_damage(2, 3) == 4
     assert bot_module.attack_damage(3, 3) == 5
     assert bot_module.attack_damage(2, 3, 1) == 5
+    golden_chancellor = {
+        "name": "Золотая фигурка Канцлера",
+        "conditions": "+1 ко всем навыкам телосложения пока экипировано.",
+        "skill_modifiers": "{}",
+        "attribute_modifiers": "{}",
+        "equipped": 1,
+    }
+    physique_skills = {
+        skill for skill, attribute in bot_module.SKILL_ATTRIBUTES.items()
+        if attribute == "Телосложение"
+    }
+    assert physique_skills
+    assert all(bot_module.equipment_skill_modifier([golden_chancellor], skill) == 1 for skill in physique_skills)
+    assert bot_module.equipment_skill_modifier([golden_chancellor], "Стрельба") == 0
+    assert bot_module.equipment_skill_modifier([{**golden_chancellor, "equipped": 0}], "Сила") == 0
     equipped_crowbar = {
         "category": "Оружие ближнего боя", "equipped": 1,
         "properties": "Разрушающее, Тяжёлое", "attachment_melee_damage": 0,

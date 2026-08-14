@@ -438,7 +438,16 @@ def equipment_skill_modifier(items: list[dict], skill: str) -> int:
     }
     skill_stem = skill_stems.get(skill, skill.casefold())
     attribute = SKILL_ATTRIBUTES.get(skill, "")
+    attribute_stem = {
+        "Телосложение": "телосложен",
+        "Ловкость": "ловкост",
+        "Смекалка": "смекалк",
+        "Эмпатия": "эмпати",
+    }.get(attribute, attribute.casefold())
     for item in items:
+        text = item.get("conditions") or ""
+        if "пока экипировано" in text.casefold() and not item.get("equipped"):
+            continue
         try:
             structured_skills = json.loads(item.get("skill_modifiers") or "{}")
             structured_attributes = json.loads(item.get("attribute_modifiers") or "{}")
@@ -446,11 +455,18 @@ def equipment_skill_modifier(items: list[dict], skill: str) -> int:
             structured_skills, structured_attributes = {}, {}
         total += int(structured_skills.get(skill, 0))
         total += int(structured_attributes.get(attribute, 0))
-        text = item.get("conditions") or ""
         for sentence in re.split(r"[.;]", text):
             bonus = re.search(r"([+−-]\d+)\s+к\s+(.+)", sentence, re.IGNORECASE)
             if bonus and skill_stem in bonus.group(2).casefold():
                 total += int(bonus.group(1).replace("−", "-"))
+                continue
+            group_bonus = re.search(
+                r"([+−-]\d+)\s+ко?\s+всем навыкам\s+([^,;]+)",
+                sentence,
+                re.IGNORECASE,
+            )
+            if group_bonus and attribute_stem in group_bonus.group(2).casefold():
+                total += int(group_bonus.group(1).replace("−", "-"))
     return total
 
 
