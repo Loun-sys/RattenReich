@@ -26,6 +26,9 @@ async def main():
         assert bot_module.can_purchase(trench, first, "Протезы")
         purchased, _, _ = await db.purchase_item(trench_id, first["id"], bot_module.required_protection_level(first) or 0)
         assert purchased
+        # Покупка создаёт заявку снабжения; отдельную выданную копию используем
+        # для проверки установки и расхода максимальной Воли.
+        await db.give_item(trench_id, first)
         row = await db.inventory_item_by_name(trench_id, first["name"])
         assert (await db.set_equipped(trench_id, row["id"], True))[0]
         equipped = await db.character(1, 101)
