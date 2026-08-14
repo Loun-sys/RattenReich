@@ -16,6 +16,13 @@ async def main() -> None:
         await db.set_skill(character_id, "Снабжение", -5)
         await db.update_character(character_id, "supply_forms", 100)
         items = await db.catalog_items(1, "", 1000)
+        filter_flask = next(item for item in items if item["name"] == "Фляга с фильтром")
+        assert filter_flask["max_durability"] == 2
+        flask_row_id = await db.give_item(character_id, filter_flask)
+        first_use = await db.consume_multi_use_item(character_id, flask_row_id, filter_flask["name"])
+        assert first_use and first_use["remaining_uses"] == 1 and first_use["quantity"] == 1
+        second_use = await db.consume_multi_use_item(character_id, flask_row_id, filter_flask["name"])
+        assert second_use and second_use["remaining_uses"] == 0 and second_use["quantity"] == 0
         prosthetic = next(item for item in items if item["category"] == "Протезы" and bot_module.required_protection_level(item) <= 3)
         character = await db.character(1, 501)
         assert bot_module.can_purchase(character, prosthetic)

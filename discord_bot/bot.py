@@ -5350,6 +5350,15 @@ async def use_consumable_command(
             f'Итоговый урон: **{damage}**',
         ))
     else:
+        if item["name"] == "\u0424\u043b\u044f\u0433\u0430 \u0441 \u0444\u0438\u043b\u044c\u0442\u0440\u043e\u043c":
+            filter_roll = secrets.randbelow(2) + 1
+            lines.append(f"Бросок фильтра: **1d2 = {filter_roll}**")
+            if filter_roll == 1:
+                before, after = await bot.db.adjust_infection(character["id"], -1)
+                lines.append(f"Заражение: **{before} → {after}**")
+            else:
+                lines.append("Фильтр очистил воду, но уровень заражения не снизился.")
+
         will_match = re.search(r"восстанавлива\w*\s+(\d+)\s+[Вв]ол", text)
         if will_match:
             restored = int(will_match.group(1))

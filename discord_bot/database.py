@@ -478,6 +478,28 @@ class Database:
                     "INSERT INTO app_migrations(key) VALUES(?)",
                     (multi_use_migration,),
                 )
+            filter_flask_migration = "filter_flask_two_uses_2026_08_14"
+            filter_flask_applied = await db.execute_fetchall(
+                "SELECT 1 FROM app_migrations WHERE key=?",
+                (filter_flask_migration,),
+            )
+            if not filter_flask_applied:
+                filter_flask_name = "\u0424\u043b\u044f\u0433\u0430 \u0441 \u0444\u0438\u043b\u044c\u0442\u0440\u043e\u043c"
+                filter_flask_uses = MULTI_USE_CONSUMABLES[filter_flask_name]
+                await db.execute(
+                    """UPDATE inventory SET durability=? WHERE item_id IN
+                       (SELECT id FROM item_catalog WHERE name=?)""",
+                    (filter_flask_uses, filter_flask_name),
+                )
+                await db.execute(
+                    """UPDATE supply_warehouse SET durability=? WHERE item_id IN
+                       (SELECT id FROM item_catalog WHERE name=?)""",
+                    (filter_flask_uses, filter_flask_name),
+                )
+                await db.execute(
+                    "INSERT INTO app_migrations(key) VALUES(?)",
+                    (filter_flask_migration,),
+                )
             await db.commit()
         await self.reload_base_catalog()
         await self.migrate_legacy_optical_sights()
