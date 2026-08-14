@@ -159,9 +159,11 @@ async def apply_damage(character: dict, attribute: str, amount: int) -> str:
     before, after = await bot.db.damage(character["id"], attribute, amount)
     message = f'**{attribute}:** {before} → {after}'
     if before > 0 and after == 0:
-        first, second = secrets.randbelow(6) + 1, secrets.randbelow(6) + 1
+        physical = attribute in ("Телосложение", "Ловкость")
+        first = secrets.randbelow(7 if physical else 6) + 1
+        second = secrets.randbelow(6) + 1
         code = first * 10 + second
-        if attribute in ("Телосложение", "Ловкость"):
+        if physical:
             trauma = PHYSICAL_TRAUMAS[code]
             await bot.db.add_injury(character["id"], attribute, trauma)
             message += f'\nПолучена травма **№{code}: {trauma.name}**\n{trauma.description}\nСрок действия: {trauma.duration}. Заражение увеличено на 1.'
@@ -407,6 +409,42 @@ def burst_shot_modifier(shot_index: int) -> int:
     """Return the cumulative dice modifier for a zero-based shot index."""
     return -(max(0, int(shot_index)) * BURST_PENALTY_PER_FOLLOWUP_SHOT)
 
+
+IMPAIRMENT_SKILL_PENALTIES = {
+    "lost_left_arm": {"Стрельба": -3, "Драка": -3},
+    "lost_right_arm": {"Стрельба": -3, "Драка": -3},
+    "lost_left_leg": {"Проворство": -3, "Драка": -3},
+    "lost_right_leg": {"Проворство": -3, "Драка": -3},
+    "lost_sight": {"Стрельба": -4, "Наблюдательность": -4},
+    "lost_skin": {"Выносливость": -2},
+}
+
+
+def injury_is_compensated(character: dict, injury: dict) -> bool:
+    required = str(injury.get("compensation_position") or "")
+    if not required:
+        return False
+    for item in character.get("equipped_prosthetics", []):
+        position = str(item.get("equipped_position") or item.get("prosthetic_slot") or "")
+        position_key, required_key = position.casefold(), required.casefold()
+        if position_key == required_key or (
+            required_key in {"левая рука", "правая рука"} and position_key.endswith(required_key)
+        ):
+            return True
+    return False
+
+
+def uncompensated_impairment_skill_modifiers(character: dict, skill: str) -> list[tuple[str, int]]:
+    details = []
+    for injury in character.get("injuries", []):
+        key = str(injury.get("impairment_key") or "")
+        if not key or injury_is_compensated(character, injury):
+            continue
+        modifier = IMPAIRMENT_SKILL_PENALTIES.get(key, {}).get(skill, 0)
+        if modifier:
+            details.append((f'Увечье «{injury.get("name", key)}»', modifier))
+    return details
+
 @dataclass
 class RollPool:
     attribute: str
@@ -454,12 +492,15 @@ def make_pool(
     race_bonus = racial_skill_bonus(character, skill)
     talent_details = talent_skill_bonus_details(character, skill)
     talent_bonus = sum(value for _, value in talent_details)
-    skill_total = permanent_skill + race_bonus + talent_bonus + custom_modifier
+    injury_details = uncompensated_impairment_skill_modifiers(character, skill)
+    injury_modifier = sum(value for _, value in injury_details)
+    skill_total = permanent_skill + race_bonus + talent_bonus + custom_modifier + injury_modifier
     guaranteed = max(0, permanent_skill - 5) if skill in {"\u041b\u0435\u0447\u0435\u043d\u0438\u0435", "\u041e\u0431\u0440\u0430\u0449\u0435\u043d\u0438\u0435", "\u0417\u0430\u0449\u0438\u0442\u0430"} else 0
     modifier_details = []
     if race_bonus:
         modifier_details.append((f'\u0420\u0430\u0441\u0430 \u00ab{character["race"]}\u00bb', race_bonus))
     modifier_details.extend(talent_details)
+    modifier_details.extend(injury_details)
     if custom_modifier:
         modifier_details.append(("\u041f\u0440\u043e\u0447\u0438\u0435 \u043c\u043e\u0434\u0438\u0444\u0438\u043a\u0430\u0442\u043e\u0440\u044b", custom_modifier))
     maximum_rules = talent_effect(character, "max_attribute_for", {}) or {}
@@ -2147,7 +2188,9 @@ class CharacterPanel(discord.ui.View):
         lines = []
         for injury in injuries:
             expiry = f' · до {injury["expires_at"]} UTC' if injury.get("expires_at") else ""
-            lines.append(f'`#{injury["id"]}` **№{injury["roll_code"]} {injury["name"]}** ({injury["attribute_name"]})\n{injury["penalties"]} · {injury["duration"]}{expiry}')
+            compensated = injury_is_compensated(character, injury)
+            state = "\n✅ **Компенсирована установленным имплантом — штрафы не действуют.**" if compensated else ""
+            lines.append(f'`#{injury["id"]}` **№{injury["roll_code"]} {injury["name"]}** ({injury["attribute_name"]})\n{injury["penalties"]} · {injury["duration"]}{expiry}{state}')
         embed = discord.Embed(title="Активные травмы", description=short("\n\n".join(lines) or "Нет активных травм", 4000), color=0x7A342E)
         await interaction.response.send_message(embed=embed)
 

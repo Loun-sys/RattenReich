@@ -42,11 +42,16 @@ async def main():
         before, after = await db.damage(character_id, "Телосложение", 5)
         assert (before, after) == (5, 0)
         await db.add_injury(character_id, "Телосложение", PHYSICAL_TRAUMAS[34])
+        await db.add_injury(character_id, "Телосложение", PHYSICAL_TRAUMAS[71])
         await db.add_injury(character_id, "Ловкость", PHYSICAL_TRAUMAS[11])
         removed = await db.cleanup_expired_injuries()
         assert removed == 1
         active_injuries = await db.list_rows("injuries", character_id)
-        assert len(active_injuries) == 1 and active_injuries[0]["expires_at"] is not None
+        assert len(active_injuries) == 2
+        amputation = next(row for row in active_injuries if row["roll_code"] == 71)
+        assert amputation["expires_at"] is None
+        assert amputation["impairment_key"] == "lost_left_arm"
+        assert amputation["compensation_position"] == "Левая рука"
         await db.add_pending_injury(character_id, "Смекалка", 34)
         assert await db.delete_injury_by_code(character_id, 34, "psychological")
         remaining = await db.list_rows("injuries", character_id)

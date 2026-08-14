@@ -77,6 +77,8 @@ CREATE TABLE IF NOT EXISTS injuries (
     description TEXT NOT NULL,
     penalties TEXT NOT NULL DEFAULT '',
     duration TEXT NOT NULL DEFAULT '',
+    impairment_key TEXT NOT NULL DEFAULT '',
+    compensation_position TEXT NOT NULL DEFAULT '',
     expires_at TEXT,
     active INTEGER NOT NULL DEFAULT 1,
     created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
@@ -223,6 +225,11 @@ class Database:
                     "UPDATE injuries SET expires_at=datetime(created_at, '+' || CAST(substr(duration,1,instr(duration,' ')-1) AS INTEGER) || ' hours') WHERE duration LIKE '% ч.'"
                 )
                 await db.execute("UPDATE injuries SET expires_at=created_at WHERE duration='Мгновенное'")
+            injury_columns = {row["name"] for row in await db.execute_fetchall("PRAGMA table_info(injuries)")}
+            if "impairment_key" not in injury_columns:
+                await db.execute("ALTER TABLE injuries ADD COLUMN impairment_key TEXT NOT NULL DEFAULT ''")
+            if "compensation_position" not in injury_columns:
+                await db.execute("ALTER TABLE injuries ADD COLUMN compensation_position TEXT NOT NULL DEFAULT ''")
             character_columns = {row["name"] for row in await db.execute_fetchall("PRAGMA table_info(characters)")}
             if "hands" not in character_columns:
                 await db.execute("ALTER TABLE characters ADD COLUMN hands INTEGER NOT NULL DEFAULT 2")
@@ -583,9 +590,21 @@ class Database:
             attrs = await db.execute_fetchall("SELECT * FROM attributes WHERE character_id=?", (result["id"],))
             skills = await db.execute_fetchall("SELECT * FROM skills WHERE character_id=? ORDER BY name", (result["id"],))
             talents = await db.execute_fetchall("SELECT name,description FROM talents WHERE character_id=? ORDER BY name", (result["id"],))
+            injuries = await db.execute_fetchall(
+                "SELECT * FROM injuries WHERE character_id=? AND active=1 AND (expires_at IS NULL OR expires_at>CURRENT_TIMESTAMP) ORDER BY id",
+                (result["id"],),
+            )
+            prosthetics = await db.execute_fetchall(
+                """SELECT item_catalog.prosthetic_slot,inventory.equipped_position,item_catalog.name
+                   FROM inventory JOIN item_catalog ON item_catalog.id=inventory.item_id
+                   WHERE inventory.character_id=? AND inventory.equipped=1 AND item_catalog.category='Протезы'""",
+                (result["id"],),
+            )
             result["attributes"] = {r["name"]: {"current": r["current_value"], "max": r["max_value"]} for r in attrs}
             result["skills"] = {r["name"]: r["value"] for r in skills}
             result["talents"] = {r["name"]: r["description"] for r in talents}
+            result["injuries"] = [dict(r) for r in injuries]
+            result["equipped_prosthetics"] = [dict(r) for r in prosthetics]
             costs = await db.execute_fetchall(
                 """SELECT COALESCE(SUM(item_catalog.will_cost),0) cost FROM inventory
                    JOIN item_catalog ON item_catalog.id=inventory.item_id
@@ -977,8 +996,15 @@ class Database:
             expires_at = (datetime.now(UTC) + timedelta(hours=hours)).strftime("%Y-%m-%d %H:%M:%S")
         async with self.connect() as db:
             await db.execute(
-                "INSERT INTO injuries(character_id,attribute_name,roll_code,name,description,penalties,duration,expires_at) VALUES(?,?,?,?,?,?,?,?)",
-                (character_id, attribute, trauma.code, trauma.name, trauma.description, trauma.penalties, trauma.duration, expires_at),
+                """INSERT INTO injuries(
+                       character_id,attribute_name,roll_code,name,description,penalties,duration,
+                       impairment_key,compensation_position,expires_at
+                   ) VALUES(?,?,?,?,?,?,?,?,?,?)""",
+                (
+                    character_id, attribute, trauma.code, trauma.name, trauma.description,
+                    trauma.penalties, trauma.duration, getattr(trauma, "impairment_key", ""),
+                    getattr(trauma, "compensation_position", ""), expires_at,
+                ),
             )
             if attribute in ("Телосложение", "Ловкость"):
                 await db.execute("UPDATE characters SET infection=infection+1 WHERE id=?", (character_id,))
