@@ -222,7 +222,10 @@ def _balance_item(item: dict[str, Any]) -> dict[str, Any]:
         item["price"] = _weapon_price(item)
     elif category in {"Броня", "Щит"}:
         item["price"] = _protection_price(item)
-    if str(item.get("name") or "") not in MEDICAL_CONSUMABLES:
+    if (
+        str(item.get("name") or "") not in MEDICAL_CONSUMABLES
+        and int(item.get("source_number") or 0) != 522
+    ):
         item["price"] = int(item.get("price") or 0) + catalog_price_increase(int(item.get("price") or 0))
     _synchronize_access_text(item)
     return item
@@ -387,7 +390,11 @@ def load_catalog(path: Path) -> list[dict[str, Any]]:
                 "damage_type": row.get("Тип урона") or "",
                 "defense": defense,
                 "use_range": row.get("Дистанция") or None,
-                "ammo_max": _integer(row.get("Боезапас", ""), 0) or None,
+                "ammo_max": (
+                    _integer(row.get("Боезапас", ""), 0)
+                    or _integer(row.get("Вместимость", ""), 0)
+                    or None
+                ),
                 "fire_rate": _integer(row.get("Скорострельность", ""), 0) or None,
                 "price": _integer(row.get("Цена", ""), 0),
                 "access": access,
