@@ -3611,7 +3611,11 @@ async def dossier_command(interaction: discord.Interaction, участник: di
 @bot.tree.command(name="медаль", description="Посмотреть изображение, описание и эффект награды")
 @app_commands.describe(медаль="Какую награду открыть")
 async def medal_reference_command(interaction: discord.Interaction, медаль: str):
-    item = MEDAL_BY_CODE.get(медаль)
+    query = медаль.strip()
+    item = MEDAL_BY_CODE.get(query) or next(
+        (medal for medal in MEDALS if str(medal["name"]).casefold() == query.casefold()),
+        None,
+    )
     if not item:
         await interaction.response.send_message(
             "Выберите награду из подсказок команды.",
@@ -3635,6 +3639,18 @@ async def medal_reference_command(interaction: discord.Interaction, медаль
         )
         return
     await interaction.response.send_message(embed=embed)
+
+
+@medal_reference_command.autocomplete("медаль")
+async def medal_reference_autocomplete(interaction: discord.Interaction, current: str):
+    query = current.casefold().strip()
+    return [
+        app_commands.Choice(name=str(item["name"])[:100], value=str(item["code"]))
+        for item in MEDALS
+        if not query
+        or query in str(item["name"]).casefold()
+        or query in str(item["code"]).casefold()
+    ][:25]
 
 
 @bot.tree.command(name="медаль-выдать", description="Выдать персонажу медаль и занести основание в досье")
