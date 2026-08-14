@@ -590,6 +590,15 @@ def d6_with_luck(count: int, luck_percent: int = 0) -> list[int]:
     ]
 
 
+def reroll_positive_dice(values: list[int], luck_percent: int, keep_ones: bool) -> list[int]:
+    """Пуш: шестёрки фиксируются, единицы фиксируются только у опасных кубов."""
+    locked = {1, 6} if keep_ones else {6}
+    return [
+        value if value in locked else d6_with_luck(1, luck_percent)[0]
+        for value in values
+    ]
+
+
 
 IMPAIRMENT_ATTRIBUTE_PENALTIES = {
     "lost_left_arm": {"Телосложение": -5, "Ловкость": -5},
@@ -671,13 +680,12 @@ class RollPool:
         return max(self.minimum_successes, result) if self.minimum_successes > 0 else result
 
     def push(self) -> None:
-        reroll_positive = lambda values: [
-            value if value in (1, 6) else d6_with_luck(1, self.luck_percent)[0]
-            for value in values
-        ]
-        self.attribute_dice = reroll_positive(self.attribute_dice)
-        self.skill_dice = reroll_positive(self.skill_dice)
-        self.gear_dice = {item_id: reroll_positive(values) for item_id, values in self.gear_dice.items()}
+        self.attribute_dice = reroll_positive_dice(self.attribute_dice, self.luck_percent, keep_ones=True)
+        self.skill_dice = reroll_positive_dice(self.skill_dice, self.luck_percent, keep_ones=False)
+        self.gear_dice = {
+            item_id: reroll_positive_dice(values, self.luck_percent, keep_ones=True)
+            for item_id, values in self.gear_dice.items()
+        }
         self.negative_dice = [
             value if value == 6 else d6_with_luck(1, -self.luck_percent)[0]
             for value in self.negative_dice
@@ -4599,13 +4607,6 @@ class FreeDiceRollView(discord.ui.View):
         embed.set_footer(text=f"Бросил: {self.owner_name}")
         return embed
 
-    @staticmethod
-    def reroll_positive(values: list[int], luck_percent: int) -> list[int]:
-        return [
-            value if value in (1, 6) else d6_with_luck(1, luck_percent)[0]
-            for value in values
-        ]
-
     @discord.ui.button(label="Пуш", style=discord.ButtonStyle.primary)
     async def push_button(self, interaction: discord.Interaction, _: discord.ui.Button):
         if interaction.user.id != self.owner_id:
@@ -4613,9 +4614,9 @@ class FreeDiceRollView(discord.ui.View):
                 "Пушить может только владелец броска.", ephemeral=True,
             )
             return
-        self.yellow_rolls = self.reroll_positive(self.yellow_rolls, self.luck_percent)
-        self.green_rolls = self.reroll_positive(self.green_rolls, self.luck_percent)
-        self.black_rolls = self.reroll_positive(self.black_rolls, self.luck_percent)
+        self.yellow_rolls = reroll_positive_dice(self.yellow_rolls, self.luck_percent, keep_ones=True)
+        self.green_rolls = reroll_positive_dice(self.green_rolls, self.luck_percent, keep_ones=False)
+        self.black_rolls = reroll_positive_dice(self.black_rolls, self.luck_percent, keep_ones=True)
         self.negative_rolls = [
             value if value == 6 else d6_with_luck(1, -self.luck_percent)[0]
             for value in self.negative_rolls

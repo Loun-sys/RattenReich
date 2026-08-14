@@ -7,6 +7,14 @@ from database import Database
 
 
 async def main() -> None:
+    original_d6_with_luck = bot_module.d6_with_luck
+    bot_module.d6_with_luck = lambda count, luck_percent=0: [4] * count
+    try:
+        assert bot_module.reroll_positive_dice([1, 2, 6], 0, keep_ones=False) == [4, 4, 6]
+        assert bot_module.reroll_positive_dice([1, 2, 6], 0, keep_ones=True) == [1, 4, 6]
+    finally:
+        bot_module.d6_with_luck = original_d6_with_luck
+
     assert bot_module.attack_damage(0, 3) == 0
     assert bot_module.attack_damage(1, 3) == 3
     assert bot_module.attack_damage(2, 3) == 4
