@@ -7,6 +7,11 @@ from database import Database
 
 
 async def main() -> None:
+    assert bot_module.attack_damage(0, 3) == 0
+    assert bot_module.attack_damage(1, 3) == 3
+    assert bot_module.attack_damage(2, 3) == 4
+    assert bot_module.attack_damage(3, 3) == 5
+    assert bot_module.attack_damage(2, 3, 1) == 5
     equipped_crowbar = {
         "category": "Оружие ближнего боя", "equipped": 1,
         "properties": "Разрушающее, Тяжёлое", "attachment_melee_damage": 0,

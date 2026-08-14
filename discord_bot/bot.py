@@ -3312,8 +3312,10 @@ class AttackView(discord.ui.View):
                 value=short("\n".join(self.impairment_costs)),
                 inline=False,
             )
-        damage_factor = max(1, int(self.weapon["damage"])) if self.weapon else 1
-        damage_before_defense = max(0, self.attack_successes * damage_factor + self.damage_modifier)
+        base_damage = max(1, int(self.weapon["damage"])) if self.weapon else 1
+        damage_before_defense = attack_damage(
+            self.attack_successes, base_damage, self.damage_modifier
+        )
         modifier_text = (
             f' · модификатор урона: **{self.damage_modifier:+d}**'
             if self.damage_modifier else ""
