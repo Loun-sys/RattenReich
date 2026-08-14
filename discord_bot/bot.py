@@ -19,6 +19,7 @@ from discord.ext import commands, tasks
 from dotenv import load_dotenv
 
 from attachment_data import ATTACHMENT_BY_NAME, compatible
+from augmentation_renderer import AugmentationRenderer
 from card_renderer import CardRenderer
 from catalog_loader import MEDICAL_CONSUMABLES, MULTI_USE_CONSUMABLES, is_consumable_item
 from constants import ATTRIBUTES, CLASSES, ITEM_CATEGORIES, ITEM_SIZES, RACES, RANGES, RANKS, SKILLS
@@ -64,6 +65,7 @@ class RattenBot(commands.Bot):
         DATA_ROOT.mkdir(parents=True, exist_ok=True)
         self.db = Database(DATA_ROOT / "rattenreich.sqlite3")
         self.renderer = CardRenderer(ROOT / "assets")
+        self.augmentation_renderer = AugmentationRenderer(ROOT / "assets")
 
     async def setup_hook(self):
         await self.db.initialize()
@@ -3041,6 +3043,19 @@ class CharacterPanel(discord.ui.View):
         character = await get_character(interaction)
         if character:
             await send_dossier(interaction, character)
+
+    @discord.ui.button(label="Аугментации", style=discord.ButtonStyle.primary, custom_id="rr:augmentations", row=3)
+    async def augmentations(self, interaction: discord.Interaction, _: discord.ui.Button):
+        character = await get_character(interaction)
+        if not character:
+            return
+        await interaction.response.defer(thinking=True, ephemeral=True)
+        items = await bot.db.inventory(character["id"])
+        image = self.client.augmentation_renderer.render(character, items)
+        await interaction.followup.send(
+            file=discord.File(image, filename="аугментации.png"),
+            ephemeral=True,
+        )
 
 
 class MedalSelect(discord.ui.Select):
