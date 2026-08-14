@@ -1524,6 +1524,23 @@ class Database:
             )
             return next((dict(row) for row in rows if str(row["name"]).casefold() == name.casefold()), None)
 
+    async def base_catalog_item_by_number(self, source_number: int) -> dict[str, Any] | None:
+        async with self.connect() as db:
+            rows = await db.execute_fetchall(
+                "SELECT * FROM item_catalog WHERE guild_id=0 AND source_number=? LIMIT 1",
+                (source_number,),
+            )
+            return dict(rows[0]) if rows else None
+
+    async def characters_by_user(self, user_id: int) -> list[dict[str, Any]]:
+        async with self.connect() as db:
+            rows = await db.execute_fetchall(
+                """SELECT id,guild_id,user_id,surname,name,class_name,race
+                   FROM characters WHERE user_id=? ORDER BY guild_id""",
+                (user_id,),
+            )
+            return [dict(row) for row in rows]
+
     async def catalog_items(self, guild_id: int, query: str = "", limit: int = 25) -> list[dict[str, Any]]:
         async with self.connect() as db:
             rows = await db.execute_fetchall(

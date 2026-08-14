@@ -6373,6 +6373,47 @@ async def on_message(message: discord.Message):
         return
     if message.guild is None and message.author.id == LUCK_OWNER_ID:
         content = message.content.strip()
+        give_match = re.fullmatch(
+            r'!выдать\s+["«]?(\d+)["»]?\s+(?:<@!?(\d+)>|["«]?(\d+)["»]?)',
+            content,
+            re.IGNORECASE,
+        )
+        if give_match:
+            source_number = int(give_match.group(1))
+            target_id = int(give_match.group(2) or give_match.group(3))
+            item = await bot.db.base_catalog_item_by_number(source_number)
+            if not item:
+                await message.reply(
+                    f"Предмет с номером **{source_number}** не найден.",
+                    mention_author=False,
+                )
+                return
+            characters = await bot.db.characters_by_user(target_id)
+            if not characters:
+                await message.reply(
+                    f"У игрока `{target_id}` нет зарегистрированного персонажа.",
+                    mention_author=False,
+                )
+                return
+            if len(characters) > 1:
+                choices = "\n".join(
+                    f'• сервер `{character["guild_id"]}` — {character["surname"]} {character["name"]}'
+                    for character in characters
+                )
+                await message.reply(
+                    "У игрока несколько персонажей. Во избежание скрытой выдачи не тому персонажу "
+                    "команда ничего не изменила:\n" + choices,
+                    mention_author=False,
+                )
+                return
+            character = characters[0]
+            await bot.db.give_item(int(character["id"]), item)
+            await message.reply(
+                f'Выдано: **#{source_number} {item["name"]}** → '
+                f'{character["surname"]} {character["name"]} (`{target_id}`).',
+                mention_author=False,
+            )
+            return
         match = re.fullmatch(r"!?удача\s+(?:<@!?(\d+)>|(\d+))\s+([+-]\d+|0)", content, re.IGNORECASE)
         if match:
             target_id = int(match.group(1) or match.group(2))
@@ -6388,6 +6429,12 @@ async def on_message(message: discord.Message):
         if content.casefold() in {"удача", "!удача"}:
             await message.reply(
                 "Формат: `удача ID +10`, `удача ID -10` или `удача ID 0`.",
+                mention_author=False,
+            )
+            return
+        if content.casefold() in {"!выдать", "выдать"}:
+            await message.reply(
+                "Формат: `!выдать номер_предмета ID_игрока`.",
                 mention_author=False,
             )
             return
