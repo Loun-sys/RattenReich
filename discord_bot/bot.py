@@ -6225,6 +6225,89 @@ async def injury_delete_autocomplete(interaction: discord.Interaction, current: 
         injury for injury in character.get("injuries", [])
         if query in f'{injury["id"]} {injury["roll_code"]} {injury["name"]}'.casefold()
     ]
+
+
+def trauma_pool_for_attribute(attribute: str):
+    if attribute in {"Телосложение", "Ловкость"}:
+        return PHYSICAL_TRAUMAS
+    if attribute == "Смекалка":
+        return MENTAL_TRAUMAS
+    if attribute == "Эмпатия":
+        return SOCIAL_TRAUMAS
+    return {}
+
+
+@bot.tree.command(name="выдать-травму", description="Выдать выбранную травму персонажу")
+@app_commands.describe(
+    участник="Персонаж, который получает травму",
+    характеристика="Характеристика, к которой относится травма",
+    травма="Травма из соответствующей таблицы",
+)
+@app_commands.choices(характеристика=[
+    app_commands.Choice(name=name, value=name) for name in ATTRIBUTES
+])
+@app_commands.check(require_master_access)
+async def injury_grant(
+    interaction: discord.Interaction,
+    участник: discord.Member,
+    характеристика: app_commands.Choice[str],
+    травма: str,
+):
+    character = await bot.db.character(interaction.guild_id, участник.id)
+    if not character:
+        await interaction.response.send_message("У выбранного участника нет персонажа.", ephemeral=True)
+        return
+    try:
+        code = int(травма)
+    except ValueError:
+        code = 0
+    trauma = trauma_pool_for_attribute(характеристика.value).get(code)
+    if not trauma:
+        await interaction.response.send_message(
+            "Выберите травму из таблицы для указанной характеристики.", ephemeral=True
+        )
+        return
+    await bot.db.add_injury(character["id"], характеристика.value, trauma)
+    extra = ""
+    if характеристика.value in {"Смекалка", "Эмпатия"}:
+        before = int(character["will_current"])
+        guard = await bot.db.consume_will_guard(character["id"])
+        after = max(-10, before - max(0, 1 - guard))
+        await bot.db.update_character(character["id"], "will_current", after)
+        extra = f"\nВоля: **{before} → {after}**."
+        if guard:
+            extra += " Защита расходника поглотила потерю Воли."
+    elif характеристика.value in {"Телосложение", "Ловкость"}:
+        extra = "\nЗаражение увеличено на **1** (не выше максимума)."
+    await interaction.response.send_message(
+        f'{участник.mention} получает травму **№{trauma.code}: {trauma.name}** '
+        f'({характеристика.value}).\n{trauma.description}\n'
+        f'Штрафы: {trauma.penalties} · {trauma.duration}.{extra}'
+    )
+
+
+@injury_grant.autocomplete("травма")
+async def injury_grant_autocomplete(interaction: discord.Interaction, current: str):
+    selected = getattr(interaction.namespace, "характеристика", None)
+    attribute = selected.value if isinstance(selected, app_commands.Choice) else str(selected or "")
+    pool = trauma_pool_for_attribute(attribute)
+    query = current.casefold().strip()
+    return [
+        app_commands.Choice(
+            name=f'№{trauma.code} · {trauma.name}'[:100],
+            value=str(trauma.code),
+        )
+        for trauma in pool.values()
+        if query in f'{trauma.code} {trauma.name}'.casefold()
+    ][:25]
+
+
+@injury_grant.error
+async def injury_grant_error(interaction: discord.Interaction, error: app_commands.AppCommandError):
+    if isinstance(error, (MasterAccessRequired, app_commands.MissingPermissions)):
+        await interaction.response.send_message(MASTER_ACCESS_ERROR, ephemeral=True)
+    else:
+        raise error
     return [
         app_commands.Choice(
             name=f'ID {injury["id"]} · №{injury["roll_code"]} {injury["name"]}'[:100],

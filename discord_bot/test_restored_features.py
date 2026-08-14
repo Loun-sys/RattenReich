@@ -57,7 +57,7 @@ async def main() -> None:
         assert len((await db.motor_pool(1))["items"]) == 1
 
         command_names = {command.name for command in bot_module.bot.tree.get_commands()}
-        assert {"склад-снабжения", "снабжение", "автопарк", "магазин", "дозарядить"} <= command_names
+        assert {"склад-снабжения", "снабжение", "автопарк", "магазин", "дозарядить", "выдать-травму"} <= command_names
         skill_view = bot_module.SkillRollView(501, character, bot_module.make_pool(character, "Драка"), "", True)
         assert {getattr(child, "label", "") for child in skill_view.children} >= {"Пуш", "Завершить бросок"}
 
