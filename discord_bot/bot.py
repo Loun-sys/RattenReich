@@ -3767,6 +3767,11 @@ async def inventory_command(interaction: discord.Interaction, участник: 
 @bot.tree.command(name="админ-инвентарь", description="Административное управление инвентарём персонажа")
 @app_commands.check(require_master_access)
 async def admin_inventory_command(interaction: discord.Interaction, участник: discord.Member):
+    # Character/catalog lookups can take longer than Discord's response window.
+    # The command previously called edit_original_response() without first
+    # creating an original response, which made Discord report that the
+    # application did not respond.
+    await interaction.response.defer(ephemeral=True)
     character = await bot.db.character(interaction.guild_id, участник.id)
     if not character:
         await interaction.edit_original_response(content="У выбранного участника нет персонажа.")
