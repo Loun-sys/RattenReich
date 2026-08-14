@@ -152,6 +152,13 @@ def _record(
     }
 
 
+INSPIRATION_WILL_CAP_TALENTS = {
+    "Знамя над окопом",
+    "Голос над строем",
+    "Несломленная воля",
+}
+
+
 TALENTS = [
     _record(name, description, 0, 0, talent.get("effects", {}), "class", class_name, True)
     for class_name, talents in CLASS_TALENTS.items()
@@ -167,7 +174,17 @@ TALENTS = [
     _record(name, description, rank, 16, effects, "class_progression", class_name, False, requirements)
     for class_name, rank, requirements, name, description, effects in NEW_CLASS_TALENTS
 ] + [
-    _record(name, description, rank, 16, effects, "skill", None, False, {skill: level, **extra})
+    _record(
+        name,
+        description,
+        rank,
+        8 if name in INSPIRATION_WILL_CAP_TALENTS else 16,
+        effects,
+        "skill",
+        None,
+        False,
+        {skill: level, **extra},
+    )
     for skill, level, rank, name, description, extra, effects in SKILL_TALENTS
 ]
 
