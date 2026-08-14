@@ -1,13 +1,26 @@
 import asyncio
+import json
 import tempfile
+from collections import Counter
 from pathlib import Path
 
 import bot as bot_module
 from augmentation_renderer import AugmentationRenderer
 from database import Database
+from prosthetic_balance import PROSTHETIC_ACCESS_TIERS, balance_prosthetic, validate_prosthetic_balance
 
 
 async def main():
+    source = json.loads((Path(__file__).parent / "prosthetic_data.json").read_text(encoding="utf-8"))["items"]
+    validate_prosthetic_balance(source)
+    balanced = [balance_prosthetic(item) for item in source]
+    distribution = Counter((item["slot"], item["access"]) for item in balanced)
+    for slot in PROSTHETIC_ACCESS_TIERS:
+        for access in ("Общедоступное", "Защита 1", "Защита 2", "Защита 3", "Защита 4"):
+            assert distribution[(slot, access)] >= 2
+    assert min(item["price"] for item in balanced) >= 10
+    assert min(item["price"] for item in balanced if item["access"] == "Защита 4") >= 32
+
     with tempfile.TemporaryDirectory() as temp:
         db = Database(Path(temp) / "test.sqlite3")
         await db.initialize()

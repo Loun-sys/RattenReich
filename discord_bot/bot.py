@@ -4661,6 +4661,29 @@ async def free_dice_roll_command(
     )
     await interaction.response.send_message(embed=view.embed(), view=view)
 
+
+@bot.tree.command(name="инициатива", description="Бросить инициативу: базовые 5d6 плюс модификаторы")
+@app_commands.describe(
+    дополнительные_кубы="Дополнительные d6 к базовым пяти",
+    модификатор="Число, прибавляемое к итоговой сумме (может быть отрицательным)",
+)
+async def initiative_command(
+    interaction: discord.Interaction,
+    дополнительные_кубы: app_commands.Range[int, 0, 20] = 0,
+    модификатор: app_commands.Range[int, -100, 100] = 0,
+):
+    dice_count = 5 + дополнительные_кубы
+    rolls = d6(dice_count)
+    dice_total = sum(rolls)
+    total = dice_total + модификатор
+    modifier_text = f"{модификатор:+d}" if модификатор else "+0"
+    await interaction.response.send_message(
+        f'**Инициатива · {interaction.user.display_name}**\n'
+        f'Кубы ({dice_count}d6): **{", ".join(str(value) for value in rolls)}**\n'
+        f'Сумма кубов: **{dice_total}** · модификатор: **{modifier_text}**\n'
+        f'Итоговая инициатива: **{total}**'
+    )
+
 @skill_roll_command.autocomplete("навык")
 async def skill_roll_skill_autocomplete(interaction: discord.Interaction, current: str):
     character = await bot.db.character(interaction.guild_id, interaction.user.id)

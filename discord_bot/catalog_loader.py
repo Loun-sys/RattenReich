@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Any
 
 from attachment_data import ATTACHMENTS
+from prosthetic_balance import balance_prosthetic, validate_prosthetic_balance
 
 
 def _integer(value: str, default: int = 0) -> int:
@@ -417,7 +418,10 @@ def load_catalog(path: Path) -> list[dict[str, Any]]:
     if not prosthetic_path.exists():
         prosthetic_path = path.parent / "discord_bot" / "prosthetic_data.json"
     if prosthetic_path.exists():
-        for prosthetic in json.loads(prosthetic_path.read_text(encoding="utf-8")).get("items", []):
+        prosthetics = json.loads(prosthetic_path.read_text(encoding="utf-8")).get("items", [])
+        validate_prosthetic_balance(prosthetics)
+        for raw_prosthetic in prosthetics:
+            prosthetic = balance_prosthetic(raw_prosthetic)
             result.append({
                 **prosthetic, "gear": 0, "hands": 0, "damage": 0, "damage_type": "",
                 "defense": 0, "use_range": None, "ammo_max": None, "fire_rate": None,
