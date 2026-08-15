@@ -1388,6 +1388,9 @@ def inventory_slot_capacities(character: dict) -> tuple[int, int]:
     large = int(character["attributes"]["Телосложение"]["max"])
     small += int(talent_effect(character, "small_slots", 0) or 0)
     large += int(talent_effect(character, "large_slots", 0) or 0)
+    capacity_bonus = character.get("inventory_capacity_bonus") or {}
+    small += int(capacity_bonus.get("small", 0) or 0)
+    large += int(capacity_bonus.get("large", 0) or 0)
     vehicles = set(character.get("active_vehicles", ()))
     if "Ремонтный мотогрузовик «Мастерская»" in vehicles:
         small += 1

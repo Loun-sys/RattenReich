@@ -11,7 +11,7 @@ import aiosqlite
 
 from catalog_loader import MEDICAL_CONSUMABLES, MULTI_USE_CONSUMABLES, catalog_price_increase, is_consumable_item, load_catalog
 from attachment_data import ATTACHMENT_BY_NAME, apply_attachments, compatible
-from constants import ATTRIBUTES, CLASSES, SKILLS
+from constants import ATTRIBUTES, CLASSES, INVENTORY_CAPACITY_ITEMS, SKILLS
 from talent_data import TALENTS
 from medal_data import MEDALS, medal_bonus_summary
 from trauma_data import PHYSICAL_TRAUMAS
@@ -922,6 +922,25 @@ class Database:
                 (guild_id,),
             )
             result["active_vehicles"] = [row["name"] for row in fleet]
+            capacity_rows = await db.execute_fetchall(
+                """SELECT ic.name,COALESCE(SUM(i.quantity),0) AS quantity
+                   FROM inventory i JOIN item_catalog ic ON ic.id=i.item_id
+                   WHERE i.character_id=? GROUP BY ic.name""",
+                (result["id"],),
+            )
+            small_slots = 0
+            large_slots = 0
+            for row in capacity_rows:
+                bonuses = INVENTORY_CAPACITY_ITEMS.get(str(row["name"]))
+                if not bonuses:
+                    continue
+                quantity = int(row["quantity"])
+                small_slots += bonuses[0] * quantity
+                large_slots += bonuses[1] * quantity
+            result["inventory_capacity_bonus"] = {
+                "small": small_slots,
+                "large": large_slots,
+            }
             return result
 
     async def set_luck_modifier(self, user_id: int, percent: int) -> None:

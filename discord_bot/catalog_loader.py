@@ -69,6 +69,13 @@ REDUCED_BASE_PRICES = {
     "Снабжение V": 23,
 }
 
+FIXED_CATALOG_PRICES = {
+    "Большой рюкзак": 18,
+    "Разгрузочный пояс": 18,
+    "Усиленный большой рюкзак": 30,
+    "Усиленный разгрузочный пояс": 30,
+}
+
 ACCESS_FLOORS = {
     "Общедоступное": 5,
     "Снабжение I": 7,
@@ -227,6 +234,7 @@ def _balance_item(item: dict[str, Any]) -> dict[str, Any]:
         and int(item.get("source_number") or 0) != 522
     ):
         item["price"] = int(item.get("price") or 0) + catalog_price_increase(int(item.get("price") or 0))
+    item["price"] = FIXED_CATALOG_PRICES.get(str(item.get("name") or ""), item["price"])
     _synchronize_access_text(item)
     return item
 

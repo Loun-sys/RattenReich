@@ -35,4 +35,13 @@ ITEM_SIZES = ("Малый", "Большой", "Безделушка", "Прот�
 ITEM_CATEGORIES = (
     "Оружие ближнего боя", "Оружие дальнего боя", "Насадка", "Щит", "Броня", "Снаряжение", "Протезы", "Разное",
 )
+
+# Inventory capacity granted while these pieces of equipment are carried.
+# Values are (small slots, large slots); quantity is applied by the database.
+INVENTORY_CAPACITY_ITEMS = {
+    "Большой рюкзак": (1, 0),
+    "Усиленный большой рюкзак": (2, 0),
+    "Разгрузочный пояс": (0, 1),
+    "Усиленный разгрузочный пояс": (0, 2),
+}
 RANGES = ("Нулевая", "Ближняя", "Средняя", "Дальняя")
