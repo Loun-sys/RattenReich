@@ -3076,12 +3076,11 @@ class CharacterPanel(discord.ui.View):
         character = await get_character(interaction)
         if not character:
             return
-        await interaction.response.defer(thinking=True, ephemeral=True)
+        await interaction.response.defer(thinking=True)
         items = await bot.db.inventory(character["id"])
         image = self.client.augmentation_renderer.render(character, items)
         await interaction.followup.send(
             file=discord.File(image, filename="аугментации.png"),
-            ephemeral=True,
         )
 
 
