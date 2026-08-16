@@ -60,6 +60,58 @@ class AugmentationRenderer:
                 return ImageFont.truetype(str(path), size)
         return ImageFont.load_default()
 
+    @staticmethod
+    def _wrap_text(draw: ImageDraw.ImageDraw, text: str, font, width: int) -> list[str]:
+        """Wrap text to a pixel width, including unusually long single words."""
+        lines: list[str] = []
+        current = ""
+        for word in str(text or "—").split():
+            candidate = f"{current} {word}".strip()
+            if not current or draw.textlength(candidate, font=font) <= width:
+                current = candidate
+                continue
+            lines.append(current)
+            current = ""
+            remainder = word
+            while remainder and draw.textlength(remainder, font=font) > width:
+                cut = 1
+                while cut < len(remainder) and draw.textlength(remainder[:cut + 1], font=font) <= width:
+                    cut += 1
+                lines.append(remainder[:cut])
+                remainder = remainder[cut:]
+            current = remainder
+        if current:
+            lines.append(current)
+        return lines or ["—"]
+
+    def _draw_fitted_text(
+        self,
+        draw: ImageDraw.ImageDraw,
+        text: str,
+        box: tuple[int, int, int, int],
+        max_size: int = 18,
+        min_size: int = 7,
+    ) -> None:
+        """Draw wrapped text inside a dossier cell without crossing its borders."""
+        left, top, right, bottom = box
+        width = right - left
+        height = bottom - top
+        color = (82, 48, 39, 255)
+        for size in range(max_size, min_size - 1, -1):
+            font = self._font(size)
+            lines = self._wrap_text(draw, text, font, width)
+            line_box = draw.textbbox((0, 0), "Ай", font=font)
+            line_height = line_box[3] - line_box[1]
+            spacing = max(1, size // 10)
+            total_height = line_height * len(lines) + spacing * (len(lines) - 1)
+            if total_height > height:
+                continue
+            y = top
+            for line in lines:
+                draw.text((left, y), line, fill=color, font=font)
+                y += line_height + spacing
+            return
+
     def _icon(self, item: dict, size: tuple[int, int], mirror: bool) -> Image.Image | None:
         path = self.icons / str(item.get("icon_file") or "")
         if not path.is_file():
@@ -118,11 +170,11 @@ class AugmentationRenderer:
         image.alpha_composite(template)
         draw = ImageDraw.Draw(image)
         color = (82, 48, 39, 255)
-        font = self._font(18)
-        draw.text((97, 831), f'{character["surname"]} {character["name"]}', fill=color, font=font)
-        draw.text((329, 831), RANKS[int(character["rank_index"])], fill=color, font=font)
-        draw.text((97, 903), character["class_name"], fill=color, font=font)
-        draw.text((329, 903), character["race"], fill=color, font=font)
+        self._draw_fitted_text(draw, f'{character["surname"]} {character["name"]}', (97, 831, 320, 868))
+        self._draw_fitted_text(draw, RANKS[int(character["rank_index"])], (332, 831, 590, 868))
+        self._draw_fitted_text(draw, character["class_name"], (97, 903, 320, 940))
+        # The stamp occupies the right edge of the race cell.
+        self._draw_fitted_text(draw, character["race"], (332, 903, 480, 940))
 
         total = 11 if cockroach else 10
         occupied = len(equipped)
